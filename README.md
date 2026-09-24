@@ -98,5 +98,5 @@ that both compute the same agent-flow id.
 
 ## License
 
-Apache-2.0. The RAPP reference implementation is vendored verbatim as `brainfreeze_studio/rapp1.py`;
+MIT. The RAPP reference implementation is vendored verbatim as `brainfreeze_studio/rapp1.py`;
 `rapp1.vendor.json` records its source commit and checksum.
