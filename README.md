@@ -82,8 +82,9 @@ not the default. Build with `--mcp-connector-id` to route untranslated agents to
 ## How close is it?
 
 [MAPPING.md](MAPPING.md) maps every brainstem and agent.py concept to its Copilot Studio harness counterpart,
-with a status and evidence per row. Today: **19 of 31** proven or built, 5 approximated, 7 gaps. Next: one live
-run of a translated flow in an environment, then connector translations for API-calling agents.
+with a status and evidence per row. Today: **19 of 31** proven or built, 5 approximated, 7 gaps. The translated
+InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the half-cent midpoint.
+Next: connector translations for API-calling agents.
 
 ## Tests
 

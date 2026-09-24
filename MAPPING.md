@@ -12,8 +12,9 @@ brainstem concept lands, and how far that is proven.
 | **gap** | Not mapped yet; the row says what it would take |
 
 Evidence sources: [SDK capability ledger](https://github.com/kody-w/copilot-harness-sdk/blob/main/docs/harness-capability-ledger.md)
-(live proof, 7–10 Sep 2026), the SDK's RAR tutorial proof (10 Sep 2026), and this repo's tests
-(`tests/test_build.py`).
+(live proof, 7–10 Sep 2026), the SDK's RAR tutorial proof (10 Sep 2026), this repo's tests
+(`tests/test_build.py`), and a live run of this tool's own Invoice Desk build in a dev environment's Copilot Studio
+Preview (24 Sep 2026).
 
 ## Score
 
@@ -45,7 +46,7 @@ An outside MCP host is only the fallback, for agents Power Platform can't expres
 | 9 | Loopback-only routes + per-install secret for other machines | Access control policy, security groups, sharing | **proven** | SDK: `setAccessControl`, `shareAgent` (GrantAccess 204). |
 | 10 | Local memory store (`.brainstem_data`) via ManageMemory / ContextMemory | Dataverse `annotations` rows via the memory profile (ConnectorTools + skills) | **proven** / **built** | The tutorial proved write + recall live. brainfreeze-studio lays the same files (`test_real_agents_match_the_proven_profiles`). |
 | 11 | Agents' `system_context()`: text added to the system prompt on every request | No per-request prompt hook; only static instructions | **approximated** | The memory profile's "automatic context on every turn" instruction stands in for ContextMemory's preload. Other agents' `system_context()` is lost. |
-| 12 | Settings in `.env` (read by agents, `requires_env`) | Environment variables, read by the translated flow | **built** | A translated agent's setting becomes a flow parameter bound to an environment variable (for example `rapp_InvoiceApprovalLimit`), and the parity proof covers several values. `provenance.json` lists the variables to create with the SDK's `upsertEnvironmentVariable`. |
+| 12 | Settings in `.env` (read by agents, `requires_env`) | Environment variables, read by the translated flow | **built** | A translated agent's setting becomes a flow parameter bound to an environment variable (for example `rapp_InvoiceApprovalLimit`), and the parity proof covers several values. `provenance.json` lists the variables to create with the SDK's `upsertEnvironmentVariable`. Live (24 Sep 2026), the flow ran with the default limit; a changed value hasn't been tested live. |
 | 13 | Voice mode (`\|\|\|VOICE\|\|\|` split) | — | **gap** | No harness equivalent is mapped. Teams and M365 channels handle speech themselves. |
 | 14 | Channels: the web UI, any `/chat` client | Teams and Microsoft 365 Copilot (`setChannels` + publish) | **proven** | Declared and published. The portal builds the Teams app package on first publish. |
 | 15 | Health and introspection (`/health`) | `assertHarnessAgent` + `listComponents` readback | **proven** | The SDK reads back template, instructions, published state and every component. |
@@ -56,9 +57,9 @@ An outside MCP host is only the fallback, for agents Power Platform can't expres
 | # | agent.py | Copilot Studio harness | Status | Notes |
 |---|---|---|---|---|
 | 1 | Contract: `metadata` `name` / `description` / `parameters` | Skill frontmatter and input contract; tool descriptions | **built** | Read statically (the egg's code never runs during a build): `test_contract_is_read_without_running_egg_code`. |
-| 2 | HackerNews agent (`perform` calls the HN API) | Custom connector + agent flow (`WorkflowTool`) + fetch-hacker-news skill | **proven** / **built** | The tutorial proved live stories through the flow. Needs `--hn-api-name` (the environment's connector). Flow ids match the SDK's (`test_the_sdk_reads_the_workspace_and_agrees_on_flow_ids`). |
-| 3 | ManageMemory / ContextMemory agents | Dataverse Add row / List rows `ConnectorTool`s + manage-memory / recall-memory skills | **proven** / **built** | Needs `--environment` (the org URL). Without it the agent falls back to reasoning-only, and the build says so. |
-| 4 | **Rules or math in `perform()`** (for example InvoiceRouter) | An **agent flow** translated from a spec (`translations/*.json`), laid as a `WorkflowTool` | **built** | Translate-then-prove: the compiled flow's own expressions are evaluated and compared with the real Python on every test vector and setting value. InvoiceRouter: **56/56**. A wrong rule, or plain `formatNumber` (.NET rounds midpoints away from zero, Python to even), fails the gate (`tests/test_translate.py`). The SDK reads the flow tool (`test_the_sdk_reads_the_flow_tool`). Not yet run live in an environment. |
+| 2 | HackerNews agent (`perform` calls the HN API) | Custom connector + agent flow (`WorkflowTool`) + fetch-hacker-news skill | **proven** / **built** | The tutorial proved live stories through the flow. Needs `--hn-api-name` (the environment's connector). Flow ids match the SDK's (`test_the_sdk_reads_the_workspace_and_agrees_on_flow_ids`). This tool's own build fetched live stories through the flow on 24 Sep 2026. Parity note: the SDK's output contract prints the summary's closing sentence ("When presenting these to the user, render the titles as clickable markdown links exactly as written above."), which a brainstem's model follows instead of printing. |
+| 3 | ManageMemory / ContextMemory agents | Dataverse Add row / List rows `ConnectorTool`s + manage-memory / recall-memory skills | **proven** / **built** | Needs `--environment` (the org URL). Without it the agent falls back to reasoning-only, and the build says so. This tool's own build wrote a memory as a Dataverse `annotations` row and recalled it in a fresh conversation on 24 Sep 2026. |
+| 4 | **Rules or math in `perform()`** (for example InvoiceRouter) | An **agent flow** translated from a spec (`translations/*.json`), laid as a `WorkflowTool` | **proven** / **built** | Translate-then-prove: the compiled flow's own expressions are evaluated and compared with the real Python on every test vector and setting value. InvoiceRouter: **56/56**. A wrong rule, or plain `formatNumber` (.NET rounds midpoints away from zero, Python to even), fails the gate (`tests/test_translate.py`). The SDK reads the flow tool (`test_the_sdk_reads_the_flow_tool`). Live on 24 Sep 2026, the Studio agent called the flow and got the proven outputs byte-for-byte, including the exact midpoint (`0.125` → `$0.12`, Python's rounding), so the offline evaluator's prediction held live. |
 | 5 | Calls an HTTP API in `perform()` | A custom connector (OpenAPI + `script.csx`) and an agent flow, the HackerNews pattern | **gap** | Proven by hand for HackerNews. Translation specs for connectors aren't built yet. |
 | 6 | Any agent.py with no translation yet | `InlineAgentSkill` that carries the source as reference and must never claim it ran | **approximated** | Studio reasons about the code but doesn't execute it. This is the fallback until a translation exists. |
 | 7 | Agents Power Platform can't express (heavy compute, special libraries, private network) | `McpTool` → `brainfreeze-studio serve`: the egg's agents on their pinned engine, over MCP | **built** | Needs a host outside Copilot Studio, so it's the fallback only. Served live locally: `tools/call` ran the real InvoiceRouter on the grail engine. Studio → connector → server isn't proven live yet. |
@@ -80,11 +81,8 @@ An outside MCP host is only the fallback, for agents Power Platform can't expres
 
 In order of how much parity each one buys:
 
-1. **One live run of a translated flow** (agent.py row 4). Deploy the Invoice Desk build and check that
-   Copilot Studio returns the proven output, including an exact midpoint case, to confirm the evaluator's
-   .NET semantics.
-2. **Connector translations** (agent.py row 5), so API-calling agents follow the HackerNews pattern
+1. **Connector translations** (agent.py row 5), so API-calling agents follow the HackerNews pattern
    automatically.
-3. **The side-by-side parity report** (extras row 5): the same prompts to the thawed brainstem and the Studio
+2. **The side-by-side parity report** (extras row 5): the same prompts to the thawed brainstem and the Studio
    agent.
-4. **Memory seeding** (extras row 4) and **parent + child agents** (agent.py row 8).
+3. **Memory seeding** (extras row 4) and **parent + child agents** (agent.py row 8).
