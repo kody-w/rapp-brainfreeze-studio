@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rapp-brainfreeze-studio"
+version = "0.1.0"
+description = "Turn a frozen RAPP brainstem (a rapp/1 organism egg) into a Copilot Studio GitHub Copilot harness agent."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+dependencies = []
+
+[project.scripts]
+brainfreeze-studio = "brainfreeze_studio.__main__:main"
