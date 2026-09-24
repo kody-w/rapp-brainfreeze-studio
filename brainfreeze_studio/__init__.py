@@ -192,14 +192,33 @@ def _reasoning_skill(contract, source):
     return skill, yaml
 
 
+INSTRUCTIONS_LIMIT = 8000  # Copilot Studio's web editor cannot hold longer agent instructions
+
+
 def _instructions(soul, sdk_dir, routing, agent_names, generic, display_name, environment, live=()):
+    """Agent instructions; long agent lists collapse to counts so the text stays editable in Studio."""
+    for compact in (False, True):
+        text = _compose_instructions(soul, sdk_dir, routing, agent_names, generic, display_name,
+                                     environment, live, compact)
+        if len(text) <= INSTRUCTIONS_LIMIT:
+            return text
+    raise ValueError(f"agent instructions are {len(text)} characters; Copilot Studio allows "
+                     f"{INSTRUCTIONS_LIMIT}. Shorten the soul.")
+
+
+def _compose_instructions(soul, sdk_dir, routing, agent_names, generic, display_name, environment, live, compact):
     soul = soul.strip() or f"You are {display_name}."
     if not any(r in routing for r in ("hackernews", "memory-write", "memory-recall")):
         text = soul + "\n"
     else:
         template = (sdk_dir / "tutorial" / "instructions.brainstem-core.md").read_text(encoding="utf-8")
-        intro = soul + (f"\n\nMatch the observable behavior of these RAPP agents: {', '.join(agent_names)}."
-                        if agent_names else "")
+        if not agent_names:
+            intro = soul
+        elif compact:
+            intro = soul + (f"\n\nMatch the observable behavior of the {len(agent_names)} RAPP agents behind "
+                            "this agent's tools and skills.")
+        else:
+            intro = soul + f"\n\nMatch the observable behavior of these RAPP agents: {', '.join(agent_names)}."
         text = re.sub(r"^You are .*?\.\s*Match the observable behavior of the RAPP\n.*?agents\.",
                       lambda _m: intro, template, count=1, flags=re.S)
         if "hackernews" not in routing:
@@ -217,10 +236,13 @@ def _instructions(soul, sdk_dir, routing, agent_names, generic, display_name, en
             text = re.sub(r"\nCustom RAPP memory is authoritative:[\s\S]*?(?=\nValidation and safety:)", "\n", text)
             text = re.sub(r"\nAutomatic context on every turn:[\s\S]*?(?=\nValidation and safety:)", "\n", text)
     if live:
+        named = (f"{len(live)} tools, one per agent and named for it" if compact else ', '.join(live))
         text += (f"\nLive agent tools (each runs its agent's logic as a tool of this agent): "
-                 f"{', '.join(live)}. Call the matching tool whenever its agent's job comes up, pass the "
-                 "arguments its input schema asks for, and answer from what the tool returns. Never invent "
-                 "a tool result; if the tool fails, say so.\n")
+                 f"{named}. Call the matching tool whenever its agent's job comes up, pass the "
+                 "arguments its input schema asks for, and answer from what the tool returns. A tool's "
+                 "description ends with the exact values its `operation` and other selectors accept: pass one "
+                 "of them verbatim and never guess a value; if a tool answers that an operation is unknown, "
+                 "pick again from that list. Never invent a tool result; if the tool fails, say so.\n")
     if generic:
         text += (f"\nReasoning-only capabilities (no live tool in this deployment): {', '.join(generic)}. For "
                  "these, use the matching skill to explain and reason with its reference implementation, ask "
@@ -349,21 +371,38 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
         for f in sorted(Path(translations).expanduser().glob("*.json")):
             spec = json.loads(f.read_text())
             specs[spec["agent"]] = spec
+            if spec.get("class"):
+                specs.setdefault(spec["class"], spec)
     if specs:
         import tempfile
         from .flows import compile_flow, prove, tool_yaml, _setting_param
         (out / "parity").mkdir(parents=True, exist_ok=True)
+        basic_source = files.get("agents/basic_agent.py")
         for a in agents:
-            spec = specs.get(a["contract"]["name"])
+            spec = specs.get(a["contract"]["name"]) or specs.get(a["contract"].get("class"))
             if a["profile"] or not spec:
                 continue
+            materialized = spec.get("mode") == "materialized"
+            if materialized:
+                digest = hashlib.sha256(a["source"].encode("utf-8")).hexdigest()
+                if digest != spec.get("source_sha256"):
+                    a["note"] = (f"materialized translation is for different code (sha256 {spec.get('source_sha256', '?')[:12]}, "
+                                 f"egg has {digest[:12]}); rematerialize it")
+                    continue
+                if basic_source is None:
+                    a["note"] = "materialized translation needs the egg's agents/basic_agent.py for its proof"
+                    continue
             with tempfile.TemporaryDirectory() as tmp:
                 agent_file = Path(tmp) / Path(a["file"]).name
                 agent_file.write_text(a["source"])
-                report = prove(spec, agent_file, schema_name)
+                basic_file = None
+                if materialized:
+                    basic_file = Path(tmp) / "basic_agent.py"
+                    basic_file.write_bytes(basic_source)
+                report = prove(spec, agent_file, schema_name, basic_file=basic_file)
             proofs[a["contract"]["name"]] = report
             (out / "parity" / f"{spec['flow_name']}.json").write_text(json.dumps(
-                {k: v for k, v in report.items() if k != "flow_json"}, indent=2) + "\n")
+                {k: v for k, v in report.items() if k not in ("flow_json", "_all")}, indent=2) + "\n")
             if not report["parity"]:
                 a["note"] = (f"translation failed parity ({report['passed']}/{report['cases']} cases match); "
                              f"see parity/{spec['flow_name']}.json")
@@ -381,7 +420,12 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                 pname, env_schema = _setting_param(schema_name, key, meta)
                 env_vars.append({"schemaName": env_schema, "displayName": meta["display"], "type": "String",
                                  "defaultValue": str(meta["default"]), "from_setting": key})
-            a["profile"], a["note"] = "flow", None
+            a["profile"], a["note"] = ("materialized" if materialized else "flow"), None
+            if materialized:
+                a["materialized"] = {"cases": report["cases"],
+                                     "approximated_inputs": report.get("approximated_inputs") or [],
+                                     "blocked_operations": report.get("blocked_operations") or {},
+                                     "caveats": spec.get("caveats") or []}
             live.append(a["contract"]["name"])
             routing.append(f"flow:{spec['flow_name']}")
 
@@ -426,7 +470,9 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
         "agents": [{"file": a["file"], "name": a["contract"]["name"],
                     "as": ("MCP tool (real code)" if a["profile"] == "mcp" else
                            "agent flow (translated, parity proven)" if a["profile"] == "flow" else
+                           "agent flow (materialized, parity proven)" if a["profile"] == "materialized" else
                            a["profile"] or "reasoning-only skill"),
+                    **({"materialized": a["materialized"]} if a.get("materialized") else {}),
                     **({"note": a["note"]} if a["note"] else {})} for a in agents],
         "memories": len(memories),
         "parity": {k: {"cases": v["cases"], "passed": v["passed"], "parity": v["parity"]} for k, v in proofs.items()},

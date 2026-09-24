@@ -21,9 +21,9 @@ Preview (24 Sep 2026).
 | | proven + built | approximated | gap |
 |---|---|---|---|
 | Brainstem runtime (16 rows) | 10 | 4 | 2 |
-| agent.py (9 rows) | 5 | 1 | 3 |
+| agent.py (10 rows) | 6 | 1 | 3 |
 | Frozen-brainstem extras (6 rows) | 4 | 0 | 2 |
-| **Total (31 rows)** | **19** | **5** | **7** |
+| **Total (32 rows)** | **20** | **5** | **7** |
 
 **How agents keep working inside Copilot Studio:** an agent.py doesn't run in Studio, but its logic can be
 **translated** into Power Platform parts, the way the proven HackerNews and memory agents were: a custom
@@ -65,6 +65,7 @@ An outside MCP host is only the fallback, for agents Power Platform can't expres
 | 7 | Agents Power Platform can't express (heavy compute, special libraries, private network) | `McpTool` → `brainfreeze-studio serve`: the egg's agents on their pinned engine, over MCP | **built** | Needs a host outside Copilot Studio, so it's the fallback only. Served live locally: `tools/call` ran the real InvoiceRouter on the grail engine. Studio → connector → server isn't proven live yet. |
 | 8 | An agent that calls another agent | `ConnectedAgentTool` (a child harness agent) | **gap** | Proven in the SDK use cases, but brainfreeze-studio doesn't lay multi-agent brainstems as parent + child yet. |
 | 9 | Agents that call external APIs with keys in `.env` | One custom connector + connection per API | **gap** | Connection consent is portal-only; the SDK can reference connections but not create them. |
+| 10 | **Deterministic agents over their own data** (for example the 72 agents of the AIBAST agents library) | A **materialized** agent flow per agent (`"mode": "materialized"` specs from `brainfreeze_studio.materialize`), laid as a `WorkflowTool` | **proven** / **built** | The real agent runs sandboxed (network off, clock frozen); each input's rule is learned, every output is tabled, and the flow looks the answer up and puts echoed text and dates back. The proof runs every case plus probes through the real Python and the compiled flow, on three clocks for agents that print dates: AIBAST **71 of 72** agents, **33,988/33,988** cases (`tests/test_materialize.py`). Operations computed from numbers get a hand translation proven on a grid (AskHR `submit_time_off`, utility `assistance_programs`, FS `certification_tracker`). An agent that keeps state between calls is refused (the AIBAST workshop engine stays a reasoning-only skill). Live on 24 Sep 2026, in a dev environment's Copilot Studio Preview, four checked calls matched the real Python byte for byte, including two hand translations and dates from the flow's clock. Finding: the harness orchestrator reads a tool's description but not its input descriptions, so a materialized tool's description ends with the values its selectors accept; before that, the model guessed operation names. |
 
 ## Frozen-brainstem extras (what an egg adds)
 

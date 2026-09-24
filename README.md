@@ -74,6 +74,23 @@ half-cent amounts, because .NET rounds midpoints away from zero and Python round
 uses `pyFormatNumber`, a macro that compiles to plain expressions reproducing Python's rounding, and passes
 56/56. The agent's `.env` setting becomes a Power Platform environment variable the flow reads.
 
+**Materialized translations, for whole agent libraries.** Many agents are deterministic formatters over
+their own synthetic data: an `operation` plus record selectors in, markdown out. For those,
+`brainfreeze_studio.materialize` writes the translation itself. It runs the real agent.py sandboxed (network
+off, clock frozen), learns what each input does (an exact value, a case-insensitive value, the library's
+name-resolver idiom, text it echoes, or ignored), tables every output, and compiles a lookup flow. The proof
+runs every recorded case plus probes through the real Python and the compiled flow, on three frozen clocks
+when the agent prints dates, so dates it prints relative to today follow the flow's clock. An operation
+computed from numbers gets a small hand translation (`materialize(..., hand=)`): a state the flow computes
+from the numbers, plus the numbers it prints, proven on a grid. An agent that keeps state between calls is
+refused. Every materialized tool's description ends with the values its selectors accept, because the
+harness orchestrator reads a tool's description but not its input descriptions.
+
+The AIBAST Copilot applied this to the 72 published agents of the AIBAST agents library: 71 materialized,
+33,988/33,988 cases byte-exact, deployed as one harness agent with 72 flow tools. Live, four checked calls,
+including hand-translated operations and dates from the flow's clock, returned the real Python's output byte
+for byte. The workshop engine, which keeps state and runs `pac`, stays a reasoning-only skill.
+
 **Fallback for agents Power Platform can't express** (heavy compute, special libraries, a private
 network): `python3 -m brainfreeze_studio serve <egg>` serves the egg's agents over MCP on their pinned
 engine, running the real agent.py. It needs a host outside Copilot Studio, which is why it's the fallback,
@@ -82,8 +99,9 @@ not the default. Build with `--mcp-connector-id` to route untranslated agents to
 ## How close is it?
 
 [MAPPING.md](MAPPING.md) maps every brainstem and agent.py concept to its Copilot Studio harness counterpart,
-with a status and evidence per row. Today: **19 of 31** proven or built, 5 approximated, 7 gaps. The translated
-InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the half-cent midpoint.
+with a status and evidence per row. Today: **20 of 32** proven or built, 5 approximated, 7 gaps. The translated
+InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the half-cent midpoint, and
+so have the materialized AIBAST flows.
 Next: connector translations for API-calling agents.
 
 ## Tests
