@@ -45,11 +45,45 @@ An agent that matches no proven profile, or lacks the input its profile needs, i
 skill**. That skill carries the agent.py for reference and must never claim the code ran. The build prints
 which agents took which path, and why.
 
+## Keep everything in Copilot Studio: translate, then prove
+
+An agent.py doesn't run in Copilot Studio. Its logic can be **translated** into Power Platform parts, the way
+the proven HackerNews and memory agents were, and nothing then lives outside Studio:
+
+| What `perform()` does | Becomes |
+|---|---|
+| Rules or math | an **agent flow** (`WorkflowTool`) |
+| Stored data | **Dataverse** tools |
+| HTTP API calls | a **custom connector** (+ flow) |
+| Only reasoning or writing | a **skill** |
+
+A translation is a small spec (`translations/*.json`) written in Power Automate's own expression language.
+`build --translations translations/` compiles it into the flow and **proves it**. It evaluates the compiled
+flow's expressions offline, with .NET formatting semantics, and compares the result with the agent's real
+Python on every test vector and every setting value. A translation that fails the proof is refused, and the
+agent falls back to a reasoning-only skill with the reason recorded.
+
+```bash
+python3 -m brainfreeze_studio build desk.egg --name "Invoice Desk" --publisher-prefix rapp --translations translations/
+#   InvoiceRouter      -> agent flow (translated, parity proven)
+#   parity:      InvoiceRouter 56/56 PROVEN
+```
+
+The proof earns its keep. Written with plain `formatNumber`, the InvoiceRouter flow **fails** on exact
+half-cent amounts, because .NET rounds midpoints away from zero and Python rounds them to even. The spec
+uses `pyFormatNumber`, a macro that compiles to plain expressions reproducing Python's rounding, and passes
+56/56. The agent's `.env` setting becomes a Power Platform environment variable the flow reads.
+
+**Fallback for agents Power Platform can't express** (heavy compute, special libraries, a private
+network): `python3 -m brainfreeze_studio serve <egg>` serves the egg's agents over MCP on their pinned
+engine, running the real agent.py. It needs a host outside Copilot Studio, which is why it's the fallback,
+not the default. Build with `--mcp-connector-id` to route untranslated agents to it.
+
 ## How close is it?
 
 [MAPPING.md](MAPPING.md) maps every brainstem and agent.py concept to its Copilot Studio harness counterpart,
-with a status and evidence per row. Today: **15 of 28** proven or built, 5 approximated, 8 gaps. The largest gap:
-an arbitrary agent.py doesn't execute in Copilot Studio yet. Hosting agents as MCP tools is the next step.
+with a status and evidence per row. Today: **19 of 31** proven or built, 5 approximated, 7 gaps. Next: one live
+run of a translated flow in an environment, then connector translations for API-calling agents.
 
 ## Tests
 

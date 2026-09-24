@@ -32,7 +32,7 @@ from pathlib import Path
 
 from . import rapp1
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["build", "read_contract", "workflow_id_for", "StudioBuildError"]
 
 PROFILES = {
@@ -192,7 +192,7 @@ def _reasoning_skill(contract, source):
     return skill, yaml
 
 
-def _instructions(soul, sdk_dir, routing, agent_names, generic, display_name, environment):
+def _instructions(soul, sdk_dir, routing, agent_names, generic, display_name, environment, live=()):
     soul = soul.strip() or f"You are {display_name}."
     if not any(r in routing for r in ("hackernews", "memory-write", "memory-recall")):
         text = soul + "\n"
@@ -216,6 +216,11 @@ def _instructions(soul, sdk_dir, routing, agent_names, generic, display_name, en
                 text = re.sub(pat, "", text)
             text = re.sub(r"\nCustom RAPP memory is authoritative:[\s\S]*?(?=\nValidation and safety:)", "\n", text)
             text = re.sub(r"\nAutomatic context on every turn:[\s\S]*?(?=\nValidation and safety:)", "\n", text)
+    if live:
+        text += (f"\nLive agent tools (each runs its agent's logic as a tool of this agent): "
+                 f"{', '.join(live)}. Call the matching tool whenever its agent's job comes up, pass the "
+                 "arguments its input schema asks for, and answer from what the tool returns. Never invent "
+                 "a tool result; if the tool fails, say so.\n")
     if generic:
         text += (f"\nReasoning-only capabilities (no live tool in this deployment): {', '.join(generic)}. For "
                  "these, use the matching skill to explain and reason with its reference implementation, ask "
@@ -267,7 +272,8 @@ def _proof(schema_name, session_manifest):
 # ── the build ────────────────────────────────────────────────────────────────
 
 def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, environment=None,
-          session=None, model="Sonnet46", hn_api_name=None, language=1033):
+          session=None, model="Sonnet46", hn_api_name=None, language=1033, mcp_connector_id=None,
+          mcp_host=None, translations=None):
     """Egg in, harness workspace out. Returns a summary dict; writes <out_dir>/workspace and sidecars."""
     if not name or len(name) > MAX_DISPLAY_NAME:
         raise StudioBuildError(f"name must be 1-{MAX_DISPLAY_NAME} characters (longer names never finish provisioning)")
@@ -311,7 +317,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                 .replace("{{ORG_URL}}", environment or "").replace("{{HN_API_NAME}}", hn_api_name or "")
                 .replace("{{HN_WORKFLOW_ID}}", workflow_id_for(schema_name, "RAPPHackerNewsWorkflow")))
 
-    routing, generic = [], []
+    routing, generic, live = [], [], []
     used = {a["profile"] for a in agents if a["profile"]}
     prof = (sdk_dir / "tutorial" / "profiles") if sdk_dir else None
     if "hackernews" in used:
@@ -335,6 +341,68 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
             (ws / "behaviors" / f"{publisher_prefix}_{skill}.mcs.yml").write_text(fill((p / f"skill.{skill}.mcs.yml").read_text()))
             (ws / "capabilities" / "tools" / f"{publisher_prefix}_{tool}.mcs.yml").write_text(fill((p / f"tool.{tool}.mcs.yml").read_text()))
             routing.append(key)
+    # Translations first: an agent whose Power Platform translation proves parity with its real
+    # Python becomes an agent flow. A failed proof is refused (the agent falls back, with the reason).
+    proofs, env_vars = {}, []
+    specs = {}
+    if translations:
+        for f in sorted(Path(translations).expanduser().glob("*.json")):
+            spec = json.loads(f.read_text())
+            specs[spec["agent"]] = spec
+    if specs:
+        import tempfile
+        from .flows import compile_flow, prove, tool_yaml, _setting_param
+        (out / "parity").mkdir(parents=True, exist_ok=True)
+        for a in agents:
+            spec = specs.get(a["contract"]["name"])
+            if a["profile"] or not spec:
+                continue
+            with tempfile.TemporaryDirectory() as tmp:
+                agent_file = Path(tmp) / Path(a["file"]).name
+                agent_file.write_text(a["source"])
+                report = prove(spec, agent_file, schema_name)
+            proofs[a["contract"]["name"]] = report
+            (out / "parity" / f"{spec['flow_name']}.json").write_text(json.dumps(
+                {k: v for k, v in report.items() if k != "flow_json"}, indent=2) + "\n")
+            if not report["parity"]:
+                a["note"] = (f"translation failed parity ({report['passed']}/{report['cases']} cases match); "
+                             f"see parity/{spec['flow_name']}.json")
+                continue
+            wf = workflow_id_for(schema_name, spec["flow_name"])
+            wf_dir = ws / "workflows" / f"{spec['flow_name']}-{wf}"
+            wf_dir.mkdir(parents=True, exist_ok=True)
+            (wf_dir / "workflow.json").write_text(json.dumps(compile_flow(spec, schema_name), indent=2) + "\n")
+            (wf_dir / "metadata.yml").write_text(
+                f"jsonFileName: workflows/{spec['flow_name']}-{wf}/workflow.json\nworkflowId: {wf}\n"
+                f"name: {name} {spec['flow_name']}\ntype: 1\ndescription: {_yaml_scalar(spec['description'][:200])}\n"
+                "category: 5\nmode: 0\nscope: 4\n")
+            (ws / "capabilities" / "tools" / f"{spec['flow_name']}.mcs.yml").write_text(tool_yaml(spec, wf))
+            for key, meta in spec.get("settings", {}).items():
+                pname, env_schema = _setting_param(schema_name, key, meta)
+                env_vars.append({"schemaName": env_schema, "displayName": meta["display"], "type": "String",
+                                 "defaultValue": str(meta["default"]), "from_setting": key})
+            a["profile"], a["note"] = "flow", None
+            live.append(a["contract"]["name"])
+            routing.append(f"flow:{spec['flow_name']}")
+
+    mcp_ref = None
+    if mcp_connector_id:
+        internal = mcp_connector_id.rstrip("/").split("/")[-1]
+        connector = f"/providers/Microsoft.PowerApps/apis/{internal}"
+        mcp_ref = f"{schema_name}.cr.{internal}"
+        for a in agents:
+            if not a["profile"]:
+                a["profile"], a["note"] = "mcp", None
+                live.append(a["contract"]["name"])
+        if live:
+            (ws / "capabilities" / "tools" / "BrainstemAgents.mcs.yml").write_text(
+                "mcs.metadata:\n  componentName: \"Brainstem Agents (MCP)\"\n"
+                f"  description: {_yaml_scalar(('Runs the real code of these RAPP agents: ' + ', '.join(live) + '.')[:300])}\n"
+                f"kind: McpTool\nauthMode: Maker\nconnectionReference: {mcp_ref}\nconnectorId: {connector}\n"
+                "operationId: InvokeMCP\n")
+            (ws / "infrastructure" / "connections" / f"{mcp_ref}.sync.yaml").write_text(
+                f"connectionReferences:\n  - connectionReferenceLogicalName: {mcp_ref}\n    connectorId: {connector}\n")
+            routing.append("mcp")
     for a in agents:
         if a["profile"]:
             continue
@@ -343,7 +411,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
         generic.append(skill)
 
     names = [a["contract"]["name"] for a in agents]
-    instructions = _instructions(soul, sdk_dir, routing, names, generic, name, environment)
+    instructions = _instructions(soul, sdk_dir, routing, names, generic, name, environment, live)
     (ws / "settings.mcs.yml").write_text(settings_yaml(name, schema_name, instructions, model, language))
 
     proof, reference = _proof(schema_name, session_manifest)
@@ -355,9 +423,14 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
         "session": ({"address": rapp1.egg_address(session_manifest), "turns": len(proof["turns"])}
                     if session_manifest else None),
         "agent": {"displayName": name, "schemaName": schema_name, "model": model, "template": "cliagent-1.0.0"},
-        "agents": [{"file": a["file"], "name": a["contract"]["name"], "as": a["profile"] or "reasoning-only skill",
+        "agents": [{"file": a["file"], "name": a["contract"]["name"],
+                    "as": ("MCP tool (real code)" if a["profile"] == "mcp" else
+                           "agent flow (translated, parity proven)" if a["profile"] == "flow" else
+                           a["profile"] or "reasoning-only skill"),
                     **({"note": a["note"]} if a["note"] else {})} for a in agents],
         "memories": len(memories),
+        "parity": {k: {"cases": v["cases"], "passed": v["passed"], "parity": v["parity"]} for k, v in proofs.items()},
+        "environment_variables": env_vars,
         "deploy": ("node <copilot-harness-sdk>/scripts/deploy-harness-agent.mjs "
                    f"--name {json.dumps(name)} --publisher-prefix {publisher_prefix} --schema-name {schema_name} "
                    f"--workspace-dir {ws} --environment <https://org.crm.dynamics.com/>"),
@@ -366,6 +439,13 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
     (out / "proof.json").write_text(json.dumps(proof, indent=2) + "\n")
     (out / "reference-answers.json").write_text(json.dumps(reference, indent=2) + "\n")
     (out / "memory-seed.json").write_text(json.dumps(memories, indent=2) + "\n")
+    if mcp_host:
+        from .mcp import connector_definition
+        openapi, props = connector_definition(mcp_host)
+        (out / "mcp-connector").mkdir(exist_ok=True)
+        (out / "mcp-connector" / "openapi.json").write_text(json.dumps(openapi, indent=2) + "\n")
+        (out / "mcp-connector" / "apiProperties.json").write_text(json.dumps(props, indent=2) + "\n")
     return {"workspace": ws, "schema_name": schema_name, "routing": routing, "reasoning_only": generic,
+            "live": live,
             "agents": provenance["agents"], "proof_turns": len(proof["turns"]), "memories": len(memories),
             "files": sorted(str(p.relative_to(ws)) for p in ws.rglob("*") if p.is_file())}

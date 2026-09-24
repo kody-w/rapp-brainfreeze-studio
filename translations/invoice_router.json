@@ -1,0 +1,39 @@
+{
+  "agent": "InvoiceRouter",
+  "agent_file": "invoice_router_agent.py",
+  "flow_name": "InvoiceRouterFlow",
+  "component": "Route an invoice",
+  "description": "Routes one invoice: returns the queue it goes to and whether it needs manager approval. Runs the InvoiceRouter agent's logic as an agent flow.",
+  "inputs": {
+    "vendor": {"type": "string", "description": "Vendor name"},
+    "amount": {"type": "number", "description": "Invoice total in dollars"}
+  },
+  "required": ["vendor", "amount"],
+  "settings": {
+    "INVOICE_APPROVAL_LIMIT": {"display": "Invoice approval limit", "default": "10000", "test_values": ["5000", "25000", "25000.5"]}
+  },
+  "steps": [
+    ["limit", "@float(setting('INVOICE_APPROVAL_LIMIT'))"],
+    ["amount", "@float(input('amount'))"],
+    ["prefix", "@concat(input('vendor'), ' $', pyFormatNumber(step('amount'), 'N2'), ': queue ')"]
+  ],
+  "outputs": {
+    "result": "@if(greater(step('amount'), step('limit')), concat(step('prefix'), 'APPROVAL, needs AP manager sign-off (limit $', pyFormatNumber(step('limit'), 'N0'), ').'), concat(step('prefix'), 'AUTO-PAY, no approval needed.'))"
+  },
+  "vectors": [
+    {"vendor": "Northwind Traders", "amount": 4200},
+    {"vendor": "Fabrikam", "amount": 18750},
+    {"vendor": "Litware", "amount": 10000},
+    {"vendor": "Litware", "amount": 10000.01},
+    {"vendor": "Litware", "amount": 9999.99},
+    {"vendor": "Proseware", "amount": 0},
+    {"vendor": "Adatum", "amount": 1234567.891},
+    {"vendor": "Tailspin Toys", "amount": 22400.5},
+    {"vendor": "Café Ñandú", "amount": 312.4},
+    {"vendor": "O'Brien & Sons", "amount": 99999},
+    {"vendor": "Refund Co", "amount": -50},
+    {"vendor": "Half Cent", "amount": 0.125},
+    {"vendor": "Half Cent", "amount": 2.675},
+    {"vendor": "", "amount": 7}
+  ]
+}
