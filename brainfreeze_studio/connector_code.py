@@ -175,6 +175,21 @@ def _framework():
     return f"{majors[-1]}.0"
 
 
+_CAN_PROVE = {}
+
+
+def can_prove():
+    """Whether connector code can be proven here: a .NET 8 (or later) SDK on PATH. A runtime alone isn't enough
+    (the Azure Functions host is .NET, so `dotnet` can be there with no SDK)."""
+    if "ok" not in _CAN_PROVE:
+        try:
+            _framework()
+            _CAN_PROVE["ok"] = True
+        except ConnectorCodeError:
+            _CAN_PROVE["ok"] = False
+    return _CAN_PROVE["ok"]
+
+
 def compile_script(script):
     """Compile script.csx (text) with the runtime stubs into a runner; cached by content. Returns the runner's dll."""
     framework = _framework()

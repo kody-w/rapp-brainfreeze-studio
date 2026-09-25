@@ -286,9 +286,8 @@ def _compose_instructions(soul, sdk_dir, routing, agent_names, generic, display_
 def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars, files_home=None,
                         run_proofs=True):
     """Prove a connector-code port (connector_code.prove) and, when it holds, lay the connector, its flow and the tool.
-    Without the .NET SDK, or with run_proofs off (no agent code may run here), only a proof recorded for these exact
+    Without a .NET SDK, or with run_proofs off (no agent code may run here), only a proof recorded for these exact
     bytes lays it. Returns whether the agent became live; a refused port leaves a note and the agent falls back."""
-    import shutil
     import tempfile
     from . import connector_code as cc
     from .flows import tool_yaml
@@ -303,7 +302,7 @@ def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_
         a["note"] = "a connector-code proof needs the egg's agents/basic_agent.py"
         return False
     script_path = Path(spec["_dir"]) / spec["script"]
-    if not run_proofs or shutil.which("dotnet") is None:
+    if not run_proofs or not cc.can_prove():
         report = cc.recorded_proof(spec, digest, hashlib.sha256(basic).hexdigest(),
                                    script_path.read_text(encoding="utf-8"))
         if report is None:

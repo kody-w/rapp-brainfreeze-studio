@@ -292,6 +292,14 @@ class RecordedProofTests(unittest.TestCase):
 
 @unittest.skipUnless(JSON_DOCTOR and JSON_DOCTOR.is_file(), "needs a RAPP_Store checkout (BFS_RAPP_STORE)")
 class BuildWithoutProvingTests(unittest.TestCase):
+    def test_a_dotnet_runtime_without_an_sdk_cannot_prove(self):
+        def runtime_only(cmd, **kw):             # what `dotnet --list-sdks` prints where only the runtime is
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        with mock.patch.dict(cc._CAN_PROVE, clear=True), mock.patch("subprocess.run", runtime_only):
+            self.assertFalse(cc.can_prove())
+        with mock.patch.dict(cc._CAN_PROVE, clear=True), mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertFalse(cc.can_prove())
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="bfs-recorded-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -303,8 +311,7 @@ class BuildWithoutProvingTests(unittest.TestCase):
                                     translations=str(translations), host_js=self.host, fetch_vendor=None, **kw)
 
     def test_without_the_dotnet_sdk_a_port_is_laid_on_its_recorded_proof(self):
-        real = shutil.which
-        with mock.patch("shutil.which", lambda name, *a, **k: None if name == "dotnet" else real(name, *a, **k)), \
+        with mock.patch.object(cc, "can_prove", return_value=False), \
                 mock.patch.object(cc, "prove", side_effect=AssertionError("nothing is run")):
             s = self.prepare("@rapp/json_doctor", ROOT / "translations")
         agent = s["agent"]["agents"][0]
