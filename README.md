@@ -112,7 +112,12 @@ recorded HTTP responses. Any difference refuses it. The flow around the code doe
   60/60 offline; live, 11/11 flow runs matched the Python on the uploaded bytes, and the harness agent, asked in
   plain words, called the tool with the right arguments and returned the proven output.
 
-Ports are written by hand today; the gate is what makes them safe to ship.
+Ports are written by hand today; the gate is what makes them safe to ship. A passing proof can be recorded
+(`python3 -m brainfreeze_studio record-proof translations/json_doctor.json <agent.py>` writes
+`translations/json_doctor.proof.json`), pinned to the exact bytes it ran: the agent, its BasicAgent, the port with
+PyCompat, and the spec. A build with no .NET SDK, such as the Azure Function's, lays a port only on a record for
+those bytes, and runs no agent code to do it. The tests fail when a port changes without a new record. A connector
+deployed for the first time takes a few minutes before its code answers; until then its calls fail with 404.
 
 **Fallback for agents Power Platform can't express** (heavy compute, special libraries, a private
 network): `python3 -m brainfreeze_studio serve <egg>` serves the egg's agents over MCP on their pinned

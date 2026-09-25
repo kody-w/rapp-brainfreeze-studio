@@ -677,6 +677,8 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
             code.append({"displayName": c["displayName"], "internalId": internal, "operation": op,
                          "connection": conn, "connectionOperation": conn_op})
             log(f"   {c['displayName']}: {op} ({internal}); connection {conn_op}")
+            if op == "created":
+                log("   (a new connector's code can take a few minutes to answer; until then its calls fail with 404)")
         for wf in ws["workflows"]:
             wf["definition"] = fill_connectors(wf["definition"], ids)
         ws["connection_references"] = {k: fill_connectors(v, ids) for k, v in ws["connection_references"].items()}

@@ -125,11 +125,16 @@ Power Apps token, which it gets with their refresh token.
 - **Agents that read files**, when their connector-code port is among the job's translations, read them from
   SharePoint: `filesSite` and `filesFolder` set where (default: the environment's RAPP Files Site, else the
   tenant's root site, and `/Shared Documents`).
-- **Translations** follow the same rule as eggs: they run the rapplication's code, so they need
-  `BFS_ALLOW_TRANSLATIONS`.
+- **Translations:** a job without its own uses the repo's (`translations/`, bundled by `publish.sh`). Proofs that
+  run the rapplication's code run only with `BFS_ALLOW_TRANSLATIONS`, as for eggs. The Function has no .NET SDK, so
+  a connector-code port is laid on the proof recorded for its exact bytes (`<port>.proof.json`), which runs
+  nothing. The job asks for the user's Power Apps token when the agent runs connector code, which needs a
+  connection.
 
 On 25 Sep 2026 a job deployed BookFactory this way in 54 seconds (agent, flows and a published code app), and the
-app ran in the Power Apps player.
+app ran in the Power Apps player. Another job deployed JSON Doctor in 148 seconds, with its connector code on the
+recorded proof and the user's existing SharePoint connection; 7/7 runs of its flow equal the Python. A connector
+made for the first time took about two minutes before its code answered (404 until then).
 
 ## Notes
 
