@@ -28,13 +28,17 @@ def build_test_host(outfile):
 
 
 class Player:
-    def __init__(self, dist, flow_definitions=None, copilot=None, csp=codeapp.DEFAULT_CSP):
+    def __init__(self, dist, flow_definitions=None, copilot=None, csp=codeapp.DEFAULT_CSP, connector_code=None):
         self.dist = Path(dist)
         self.flows = dict(flow_definitions or {})
         self.copilot = copilot or (lambda message: "")
         self.csp = csp
         self.calls = []
         self.server = None
+        # connector-code flows: {placeholder display name: compiled runner dll}; their workspace files live here,
+        # as the flow keeps them in Dataverse notes
+        self.connector_code = dict(connector_code or {})
+        self.notes = {}
 
     def _sdk(self, request):
         kind, payload = request.get("kind"), request.get("payload") or {}
@@ -52,11 +56,32 @@ class Player:
             if codeapp.is_chat_broker(flow):            # the agentic runtime: the test's stand-in agent answers
                 return {"success": True, "data": {"reply": self.copilot(given.get("message") or ""),
                                                   "conversation_id": "conv-1"}}
+            code = self._connector_code(flow)
+            if code:
+                return {"success": True, "data": self._run_code(flow, code, given)}
             try:
                 return {"success": True, "data": flows.run_flow(flow, given)}
             except Exception as e:  # noqa: BLE001 - reported to the app as the SDK would
                 return {"success": False, "error": {"message": f"{type(e).__name__}: {e}"}}
         return {"success": False, "error": {"message": f"no stand-in for {table}.{name}"}}
+
+    def _connector_code(self, flow):
+        text = json.dumps(flow)
+        return next((dll for name, dll in self.connector_code.items() if "{{CONNECTOR:%s}}" % name in text), None)
+
+    def _run_code(self, flow, dll, given):
+        """What a connector-code flow does: read its files, run the code, keep what it wrote, answer its output."""
+        import time
+        import uuid
+        from brainfreeze_studio import connector_code
+        run = flow["properties"]["definition"]["actions"]["Run_the_agent"]["inputs"]["parameters"]
+        files = list(run["body/state"])
+        body = {"args": {k: given.get(k) for k in run["body/args"]}, "state": {f: self.notes.get(f) for f in files},
+                "now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "id": str(uuid.uuid4())}
+        raw = connector_code.run_script(dll, [{"operationId": "Run", "body": body}])[0]
+        reply = json.loads(raw["body"])
+        self.notes.update(reply.get("state") or {})
+        return {"result": reply["output"]}
 
     def start(self):
         player = self

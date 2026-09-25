@@ -77,6 +77,8 @@ def _literal(node, consts):
     """ast.literal_eval that also resolves module-level string/number constants by name."""
     if isinstance(node, ast.Name) and node.id in consts:
         return consts[node.id]
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in consts:
+        return consts[node.value.id][_literal(node.slice, consts)]       # AGENT["metadata"] of a module constant
     if isinstance(node, ast.Dict):
         return {_literal(k, consts): _literal(v, consts) for k, v in zip(node.keys, node.values)}
     if isinstance(node, (ast.List, ast.Tuple)):
@@ -279,6 +281,68 @@ def _compose_instructions(soul, sdk_dir, routing, agent_names, generic, display_
     return text.replace("{{ORG_URL}}", environment or "").replace("{{DISPLAY_NAME}}", display_name)
 
 
+# ── connector code: an agent's logic ported to C#, proven, run by a flow that keeps its state ─────────────────
+
+def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars):
+    """Prove a connector-code port (connector_code.prove) and, when it holds, lay the connector, its flow and the tool.
+    Returns whether the agent became live; a refused port leaves a note and the agent falls back."""
+    import tempfile
+    from . import connector_code as cc
+    from .flows import tool_yaml
+    from .materialize import agent_python
+    digest = hashlib.sha256(a["source"].encode("utf-8")).hexdigest()
+    if spec.get("source_sha256") and digest != spec["source_sha256"]:
+        a["note"] = (f"the connector-code port is for different code (sha256 {spec['source_sha256'][:12]}, the egg has "
+                     f"{digest[:12]}); port it again")
+        return False
+    basic = files.get("agents/basic_agent.py")
+    if basic is None:
+        a["note"] = "a connector-code proof needs the egg's agents/basic_agent.py"
+        return False
+    script_path = Path(spec["_dir"]) / spec["script"]
+    with tempfile.TemporaryDirectory() as tmp:
+        agent_file, basic_file = Path(tmp) / Path(a["file"]).name, Path(tmp) / "basic_agent.py"
+        agent_file.write_text(a["source"])
+        basic_file.write_bytes(basic)
+        try:
+            report = cc.prove(spec, agent_file, basic_file, script_path, python=agent_python(spec.get("python")))
+        except cc.ConnectorCodeError as e:
+            a["note"] = f"connector code not proven: {e}"
+            return False
+    proofs[a["contract"]["name"]] = report
+    (out / "parity").mkdir(parents=True, exist_ok=True)
+    (out / "parity" / f"{spec['flow_name']}.json").write_text(json.dumps(report, indent=2) + "\n")
+    if not report["parity"]:
+        a["note"] = (f"connector code failed parity ({report['passed']}/{report['cases']} calls match); "
+                     f"see parity/{spec['flow_name']}.json")
+        return False
+    display, dv_name = cc.connector_name(schema_name, spec)
+    logical = "shared_rapp_code_" + re.sub(r"[^a-z0-9]", "", spec["flow_name"].lower())
+    cdir = ws / "connectors" / spec["flow_name"]
+    cdir.mkdir(parents=True, exist_ok=True)
+    (cdir / "openapi.json").write_text(json.dumps(cc.openapi(spec, display), indent=2) + "\n")
+    (cdir / "apiProperties.json").write_text(json.dumps(cc.api_properties(), indent=2) + "\n")
+    (cdir / "script.csx").write_text(cc.linked(script_path.read_text(encoding="utf-8")))
+    (cdir / "connector.json").write_text(json.dumps({
+        "displayName": display, "name": dv_name, "referenceLogicalName": f"{schema_name}.{logical}",
+        "placeholder": cc.CONNECTOR_PLACEHOLDER % display, "script_sha256": report["script_sha256"],
+        "state": spec.get("state") or {}}, indent=2) + "\n")
+    wf = workflow_id_for(schema_name, spec["flow_name"])
+    wf_dir = ws / "workflows" / f"{spec['flow_name']}-{wf}"
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    (wf_dir / "workflow.json").write_text(json.dumps(cc.compile_flow(spec, schema_name, name, display, logical),
+                                                     indent=2) + "\n")
+    (wf_dir / "metadata.yml").write_text(
+        f"jsonFileName: workflows/{spec['flow_name']}-{wf}/workflow.json\nworkflowId: {wf}\n"
+        f"name: {name} {spec['flow_name']}\ntype: 1\ndescription: {_yaml_scalar(spec['description'][:200])}\n"
+        "category: 5\nmode: 0\nscope: 4\n")
+    (ws / "capabilities" / "tools" / f"{spec['flow_name']}.mcs.yml").write_text(
+        tool_yaml({**spec, "outputs": {"result": ""}}, wf))
+    a["profile"], a["note"] = "connector-code", None
+    a["flow"] = {"name": spec["flow_name"], "workflowId": wf}
+    return True
+
+
 # ── memory and proof ─────────────────────────────────────────────────────────
 
 def _memories(files):
@@ -405,6 +469,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
     if translations:
         for f in sorted(Path(translations).expanduser().glob("*.json")):
             spec = json.loads(f.read_text())
+            spec["_dir"] = str(f.parent)
             specs[spec["agent"]] = spec
             if spec.get("class"):
                 specs.setdefault(spec["class"], spec)
@@ -416,6 +481,11 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
         for a in agents:
             spec = specs.get(a["contract"]["name"]) or specs.get(a["contract"].get("class"))
             if a["profile"] or not spec:
+                continue
+            if spec.get("mode") == "connector-code":
+                if _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars):
+                    live.append(a["contract"]["name"])
+                    routing.append(f"code:{spec['flow_name']}")
                 continue
             materialized = spec.get("mode") == "materialized"
             if materialized:
@@ -513,6 +583,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                     "as": ("MCP tool (real code)" if a["profile"] == "mcp" else
                            "agent flow (translated, parity proven)" if a["profile"] == "flow" else
                            "agent flow (materialized, parity proven)" if a["profile"] == "materialized" else
+                           "agent flow + connector code (ported, parity proven)" if a["profile"] == "connector-code" else
                            a["profile"] or ("model-run skill (the agent's prompts, answered by the agent's model)"
                                             if a.get("llm") else "reasoning-only skill")),
                     **({"flow": a["flow"]} if a.get("flow") else {}),

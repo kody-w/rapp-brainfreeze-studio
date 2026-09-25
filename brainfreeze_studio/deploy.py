@@ -205,8 +205,15 @@ def read_workspace(workspace):
     prov = ws.parent / "provenance.json"
     if prov.is_file():
         env_vars = json.loads(prov.read_text(encoding="utf-8")).get("environment_variables") or []
+    connectors = []
+    for d in sorted((ws / "connectors").iterdir()) if (ws / "connectors").is_dir() else []:
+        if (d / "connector.json").is_file():
+            connectors.append({**json.loads((d / "connector.json").read_text(encoding="utf-8")),
+                               "openapi": json.loads((d / "openapi.json").read_text(encoding="utf-8")),
+                               "properties": json.loads((d / "apiProperties.json").read_text(encoding="utf-8"))["properties"],
+                               "script": (d / "script.csx").read_text(encoding="utf-8")})
     return {"settings": settings, "components": components, "connection_references": refs,
-            "workflows": workflows, "environment_variables": env_vars}
+            "workflows": workflows, "environment_variables": env_vars, "connectors": connectors}
 
 
 def component_schema_name(schema_name, c):
@@ -274,6 +281,64 @@ def _stored_definition(clientdata):
         if isinstance(ref, dict) and isinstance(ref.get("api"), dict):
             ref["api"].pop("logicalName", None)
     return stored
+
+
+def ensure_connector(dv, c):
+    """A custom connector with its code, as the Dataverse `connectors` row pac writes: created, updated when its
+    definition or code changed, else left alone. Returns (its internal id, the operation)."""
+    props = c["properties"]
+    body = {"displayname": c["displayName"], "description": c["openapi"]["info"].get("description", "")[:1000],
+            "connectortype": 1, "openapidefinition": json.dumps(c["openapi"]),
+            "connectionparameters": json.dumps(props.get("connectionParameters") or {}),
+            "policytemplateinstances": json.dumps(props.get("policyTemplateInstances") or []),
+            "scriptoperations": json.dumps(props.get("scriptOperations") or []),
+            "customcodeblobcontent": c["script"], "iconbrandcolor": props.get("iconBrandColor") or "#5a4fcf"}
+    rows = dv.value(f"connectors?$filter=name eq '{_q(c['name'])}'&$select=connectorid,connectorinternalid,displayname,"
+                    "openapidefinition,customcodeblobcontent,scriptoperations")
+    if rows:
+        cur = rows[0]
+        try:
+            same = (json.loads(cur.get("openapidefinition") or "null") == c["openapi"]
+                    and cur.get("customcodeblobcontent") == c["script"]
+                    and json.loads(cur.get("scriptoperations") or "[]") == (props.get("scriptOperations") or [])
+                    and cur.get("displayname") == c["displayName"])
+        except ValueError:
+            same = False
+        if not same:
+            dv("PATCH", f"connectors({cur['connectorid']})", body)
+        return cur["connectorinternalid"], "unchanged" if same else "updated"
+    created, headers = dv("POST", "connectors", {"name": c["name"], **body}, prefer="return=representation")
+    internal = (created or {}).get("connectorinternalid")
+    if not internal:
+        rows = dv.value(f"connectors?$filter=name eq '{_q(c['name'])}'&$select=connectorinternalid")
+        internal = rows[0]["connectorinternalid"] if rows else None
+    if not internal:
+        raise DeployError(f"Dataverse did not return the internal id of connector {c['name']}")
+    return internal, "created"
+
+
+def ensure_code_connection(get_powerapps_token, environment_id, internal, display_name, opener=None, wait=10):
+    """A connection to a connector that needs no sign-in (it runs its own code), made as the user through the Power
+    Apps resource provider; a connected one of theirs is reused. Returns (its name, the operation)."""
+    import uuid
+    from .codeapp_publish import PublishError, _Api
+    api = _Api(get_powerapps_token, opener)
+    where = urllib.parse.quote(f"environment eq '{environment_id}'")
+    body = {"properties": {"environment": {"id": f"/providers/Microsoft.PowerApps/environments/{environment_id}",
+                                           "name": environment_id}, "displayName": display_name}}
+    for attempt in range(6):                  # a connector made a moment ago can take a little while to appear
+        try:
+            listed = api.call("GET", f"/apis/{internal}/connections?api-version=2016-11-01&$filter={where}") or {}
+            for conn in listed.get("value") or []:
+                if any(st.get("status") == "Connected" for st in (conn.get("properties") or {}).get("statuses") or []):
+                    return conn["name"], "existing"
+            name = uuid.uuid4().hex
+            api.call("PUT", f"/apis/{internal}/connections/{name}?api-version=2016-11-01&$filter={where}", body)
+            return name, "created"
+        except PublishError as e:
+            if attempt == 5 or "404" not in str(e) and "NotFound" not in str(e):
+                raise DeployError(f"could not connect to {display_name}: {e}")
+            time.sleep(wait)
 
 
 def ensure_workflow(dv, wf):
@@ -405,8 +470,10 @@ def environment_id(dv):
 
 
 def deploy(workspace, environment, get_token, *, schema_name=None, display_name=None, connections=None,
-           keep_extra_components=False, do_publish=True, log=print, dataverse=None):
-    """Deploy a harness workspace as the user whose token get_token() returns. Returns a summary dict."""
+           keep_extra_components=False, do_publish=True, log=print, dataverse=None, get_powerapps_token=None,
+           powerapps_opener=None):
+    """Deploy a harness workspace as the user whose token get_token() returns. Returns a summary dict. A workspace
+    with connector code (workspace/connectors/) also needs get_powerapps_token, for the connectors' connections."""
     ws = read_workspace(workspace)
     settings = ws["settings"]
     schema = schema_name or settings["schemaName"]
@@ -417,6 +484,29 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
         raise DeployError(f"display name is {len(name)} characters; longer than 42 never finishes provisioning")
     dv = dataverse or Dataverse(environment, get_token)
     result = {"schemaName": schema, "displayName": name, "environment": dv.environment}
+
+    code = []
+    if ws["connectors"]:
+        from .connector_code import fill_connectors
+        log("0/7 custom connectors (the agents' logic, as connector code)")
+        if not get_powerapps_token:
+            raise DeployError("this workspace runs agent logic as connector code; its connections are made with your "
+                              "Power Apps token (https://service.powerapps.com/), which wasn't given")
+        env_id = environment_id(dv)
+        ids, connections = {}, dict(connections or {})
+        for c in ws["connectors"]:
+            internal, op = ensure_connector(dv, c)
+            conn, conn_op = ensure_code_connection(get_powerapps_token, env_id, internal, c["displayName"],
+                                                   opener=powerapps_opener)
+            ids[c["displayName"]] = internal
+            connections[c["referenceLogicalName"]] = conn
+            code.append({"displayName": c["displayName"], "internalId": internal, "operation": op,
+                         "connection": conn, "connectionOperation": conn_op})
+            log(f"   {c['displayName']}: {op} ({internal}); connection {conn_op}")
+        for wf in ws["workflows"]:
+            wf["definition"] = fill_connectors(wf["definition"], ids)
+        ws["connection_references"] = {k: fill_connectors(v, ids) for k, v in ws["connection_references"].items()}
+    result["connectors"] = code
 
     log("1/7 connection references")
     references = []

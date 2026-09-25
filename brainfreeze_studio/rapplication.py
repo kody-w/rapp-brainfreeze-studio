@@ -369,11 +369,14 @@ def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, 
     summary = json.loads((out / "rapplication.json").read_text())
     dv = dataverse or dep.Dataverse(environment, get_dataverse_token)
     agent = dep.deploy(out / "workspace", environment, get_dataverse_token, log=log, do_publish=publish_agent,
-                       dataverse=dv)
+                       dataverse=dv, get_powerapps_token=get_powerapps_token, powerapps_opener=opener)
+    from .connector_code import fill_connectors
+    code_ids = {c["displayName"]: c["internalId"] for c in agent.get("connectors") or []}
     log("flows for the code app")
     flows = []
     for f in sorted((out / "powerapps-flows").glob("*.json")):
         t = json.loads(f.read_text())
+        t["definition"] = fill_connectors(t["definition"], code_ids)
         for api, ref in ((t["definition"].get("properties") or {}).get("connectionReferences") or {}).items():
             logical = ((ref or {}).get("connection") or {}).get("connectionReferenceLogicalName")
             if logical:
