@@ -1,0 +1,16 @@
+{
+  "name": "brainfreeze-studio-codeapp-host",
+  "private": true,
+  "version": "1.0.0",
+  "description": "The Power Apps code app host that runs a rapplication's UI. Built once (npm run build); per app, only rapp-config.js and rapp/ change.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild host.js --bundle --format=iife --target=es2020 --minify --legal-comments=eof --outfile=dist/host.js"
+  },
+  "dependencies": {
+    "@microsoft/power-apps": "1.4.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

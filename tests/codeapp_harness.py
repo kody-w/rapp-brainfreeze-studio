@@ -1,0 +1,127 @@
+"""A local stand-in for the Power Apps player, to run a packaged code app headless under the code app policy.
+
+It serves the app's dist/ with the default code app content security policy, a player page that embeds it, and the
+stand-in SDK's answers: a flow runs through brainfreeze_studio.flows.run_flow (the same offline evaluator the parity
+proofs use), and the app's chat flow, which reaches the Copilot Studio agent, is answered by a function the test
+supplies. Every SDK call is recorded.
+"""
+import json
+import mimetypes
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from brainfreeze_studio import codeapp, flows
+
+HERE = Path(__file__).parent / "browser"
+FAKE_SDK = HERE / "fake_power_apps.js"
+CONTEXT = {"app": {"appId": "test-app", "environmentId": "00000000-0000-0000-0000-000000000000", "appSettings": {},
+                   "queryParams": {}},
+           "user": {"fullName": "Ada Lovelace", "userPrincipalName": "ada@example.com",
+                    "objectId": "11111111-1111-1111-1111-111111111111", "tenantId": "22222222-2222-2222-2222-222222222222"},
+           "host": {"sessionId": "test-session"}}
+
+
+def build_test_host(outfile):
+    """host.js bundled with the stand-in SDK instead of @microsoft/power-apps."""
+    return codeapp.build_host(outfile=outfile, sdk_alias=str(FAKE_SDK), log=lambda *a: None)
+
+
+class Player:
+    def __init__(self, dist, flow_definitions=None, copilot=None, csp=codeapp.DEFAULT_CSP):
+        self.dist = Path(dist)
+        self.flows = dict(flow_definitions or {})
+        self.copilot = copilot or (lambda message: "")
+        self.csp = csp
+        self.calls = []
+        self.server = None
+
+    def _sdk(self, request):
+        kind, payload = request.get("kind"), request.get("payload") or {}
+        if kind == "context":
+            return CONTEXT
+        op = (payload.get("operation") or {}).get("connectorOperation") or {}
+        table, name, params = op.get("tableName"), op.get("operationName"), op.get("parameters") or {}
+        call = {"table": table, "operation": name, "parameters": params,
+                "known": table in (payload.get("dataSources") or [])}
+        self.calls.append(call)
+        if not call["known"]:
+            return {"success": False, "error": {"message": f"{table} isn't in the app's dataSourcesInfo"}}
+        if name == "Run" and table in self.flows:
+            flow, given = self.flows[table], params.get("input") or {}
+            if codeapp.is_chat_broker(flow):            # the agentic runtime: the test's stand-in agent answers
+                return {"success": True, "data": {"reply": self.copilot(given.get("message") or ""),
+                                                  "conversation_id": "conv-1"}}
+            try:
+                return {"success": True, "data": flows.run_flow(flow, given)}
+            except Exception as e:  # noqa: BLE001 - reported to the app as the SDK would
+                return {"success": False, "error": {"message": f"{type(e).__name__}: {e}"}}
+        return {"success": False, "error": {"message": f"no stand-in for {table}.{name}"}}
+
+    def start(self):
+        player = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, status, body, ctype, csp=None):
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                if csp:
+                    self.send_header("Content-Security-Policy", csp)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                path = self.path.split("?")[0]
+                if path in ("/", "/player.html"):
+                    return self._send(200, (HERE / "player.html").read_bytes(), "text/html; charset=utf-8")
+                if path.startswith("/app/"):
+                    f = (player.dist / path[len("/app/"):]).resolve()
+                    if player.dist.resolve() in f.parents and f.is_file():
+                        ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+                        if ctype.startswith("text/") or ctype.endswith("javascript"):
+                            ctype += "; charset=utf-8"
+                        return self._send(200, f.read_bytes(), ctype, player.csp)
+                return self._send(404, b"not found", "text/plain", player.csp)
+
+            def do_POST(self):
+                if self.path != "/_sdk":
+                    return self._send(404, b"not found", "text/plain")
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                body = json.dumps(player._sdk(request)).encode()
+                return self._send(200, body, "application/json")
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def stop(self):
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+
+
+VIOLATION_PROBE = ("document.addEventListener('securitypolicyviolation', e => console.error("
+                   "'CSP-VIOLATION ' + e.violatedDirective + ' ' + e.blockedURI + ' ' + (e.sourceFile || '') + ':' + e.lineNumber));")
+
+
+def open_player(playwright, base):
+    """A headless page on the player, with every content security policy violation in any frame collected."""
+    browser = playwright.chromium.launch()
+    page = browser.new_page()
+    log = {"violations": [], "errors": [], "console": []}
+
+    def on_console(m):
+        log["console"].append(f"{m.type}: {m.text}")
+        if m.text.startswith("CSP-VIOLATION") or "Content Security Policy" in m.text:
+            log["violations"].append(m.text)
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda e: log["errors"].append(str(e)))
+    page.add_init_script(VIOLATION_PROBE)
+    page.goto(base + "/player.html")
+    return browser, page, log

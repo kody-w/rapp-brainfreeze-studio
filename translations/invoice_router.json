@@ -34,6 +34,10 @@
     {"vendor": "Refund Co", "amount": -50},
     {"vendor": "Half Cent", "amount": 0.125},
     {"vendor": "Half Cent", "amount": 2.675},
+    {"vendor": "Half Cent", "amount": 11.005},
+    {"vendor": "Fabrikam", "amount": 18750.005},
+    {"vendor": "Half Cent", "amount": 0.375},
+    {"vendor": "Refund Co", "amount": -0.125},
     {"vendor": "", "amount": 7}
   ]
 }

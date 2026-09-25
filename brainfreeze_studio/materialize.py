@@ -255,16 +255,79 @@ def _b64(text):
 # ── the sandboxed runner ─────────────────────────────────────────────────────
 
 RUNNER = r'''
-import datetime as _dt, importlib.util, json, os, socket, sys, time as _time, types
+import builtins, datetime as _dt, importlib.abc, importlib.util, io, json, os, socket, subprocess, sys, time as _time, types
 
 agent_file, basic_file, clock_iso, class_name = sys.argv[1:5]
 
+# What the agent reaches beyond its arguments. A table can only stand in for a function of the arguments, so an agent
+# that reads files, calls the network, calls an LLM or starts processes is refused (and the report says which).
+_EFFECTS = set()
+_OWN = {os.path.realpath(agent_file), os.path.realpath(basic_file)}
+
 def _blocked(*a, **k):
+    _EFFECTS.add("network")
     raise OSError("network is off while this agent is materialized")
 socket.socket.connect = _blocked
 socket.socket.connect_ex = _blocked
 socket.create_connection = _blocked
 socket.getaddrinfo = _blocked
+
+def _is_own(path):
+    try:
+        return os.path.realpath(os.fspath(path)) in _OWN
+    except TypeError:
+        return True
+
+_real_open = builtins.open
+def _open(file, mode="r", *a, **k):
+    if not isinstance(file, int) and not _is_own(file):
+        _EFFECTS.add("files")
+    return _real_open(file, mode, *a, **k)
+builtins.open = io.open = _open
+
+def _fs(fn):
+    def wrapper(path=".", *a, **k):
+        if not _is_own(path):
+            _EFFECTS.add("files")
+        return fn(path, *a, **k)
+    return wrapper
+for _mod, _names in ((os.path, ("exists", "isfile", "isdir", "getsize", "getmtime")),
+                     (os, ("listdir", "scandir", "makedirs", "mkdir", "remove", "unlink", "rename", "replace", "walk"))):
+    for _n in _names:
+        if hasattr(_mod, _n):
+            setattr(_mod, _n, _fs(getattr(_mod, _n)))
+
+def _no_process(*a, **k):
+    _EFFECTS.add("processes")
+    raise OSError("starting processes is off while this agent is materialized")
+subprocess.Popen.__init__ = _no_process
+os.system = _no_process
+
+class _Watch(importlib.abc.MetaPathFinder):
+    LLM = ("openai", "anthropic", "copilot", "github_copilot_sdk")
+    NET = ("requests", "httpx", "urllib3", "aiohttp")
+    def find_spec(self, name, path=None, target=None):
+        top = name.split(".")[0]
+        if top in self.LLM:
+            _EFFECTS.add("llm")
+        elif top in self.NET:
+            _EFFECTS.add("network")
+        elif name == "utils.azure_file_storage":
+            _EFFECTS.add("files")
+        elif name.startswith("utils."):
+            _EFFECTS.add("host")
+        return None
+sys.meta_path.insert(0, _Watch())
+
+# the brainstem host's utils package: an agent that asks it for an LLM is recorded, then refused
+_utils = types.ModuleType("utils"); _utils.__path__ = []
+_llm = types.ModuleType("utils.llm")
+def _call_llm(*a, **k):
+    _EFFECTS.add("llm")
+    raise RuntimeError("LLM calls are off while this agent is materialized")
+_llm.call_llm = _call_llm
+_utils.llm = _llm
+sys.modules["utils"], sys.modules["utils.llm"] = _utils, _llm
 
 _FROZEN = _dt.datetime.fromisoformat(clock_iso)
 _real_dt, _real_date = _dt.datetime, _dt.date
@@ -296,6 +359,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(agent_file)))
 
 spec = importlib.util.spec_from_file_location("agent_under_test", agent_file)
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+_AT_IMPORT = set(_EFFECTS)
 classes = [v for v in vars(mod).values() if isinstance(v, type) and issubclass(v, basic.BasicAgent)
            and v is not basic.BasicAgent and v.__module__ == "agent_under_test"]
 if class_name:
@@ -324,11 +388,14 @@ for line in sys.stdin:
                           "description": md.get("description", ""), "parameters": md.get("parameters") or {},
                           "dicts": _dicts()}, default=str), flush=True)
         continue
+    _EFFECTS.clear()
     try:
         out = agent.perform(**req["args"])
-        print(json.dumps({"ok": True, "out": out if isinstance(out, str) else json.dumps(out, default=str)}), flush=True)
+        print(json.dumps({"ok": True, "out": out if isinstance(out, str) else json.dumps(out, default=str),
+                          "effects": sorted(_EFFECTS | _AT_IMPORT)}), flush=True)
     except Exception as e:
-        print(json.dumps({"ok": False, "out": f"{type(e).__name__}: {e}"}), flush=True)
+        print(json.dumps({"ok": False, "out": f"{type(e).__name__}: {e}", "effects": sorted(_EFFECTS | _AT_IMPORT)}),
+              flush=True)
 '''
 
 
@@ -350,6 +417,13 @@ def agent_python(version=None):
     return sys.executable
 
 
+EFFECTS = {"files": "reads or writes files (SharePoint plus connector code instead)",
+           "network": "calls the network (a custom connector instead)",
+           "llm": "calls an LLM (the harness agent reasons instead)",
+           "processes": "starts processes (the MCP fallback instead)",
+           "host": "needs services its brainstem host provides (the MCP fallback instead)"}
+
+
 class Runner:
     """Runs one agent file's perform() in a sandboxed subprocess, a batch of cases at a time."""
 
@@ -358,6 +432,7 @@ class Runner:
         self.class_name, self.python, self.timeout = class_name or "", python or sys.executable, timeout
         self.calls = 0
         self._version = None
+        self.effects = set()     # what perform() reached beyond its arguments, over every call
 
     def python_version(self):
         if self._version is None:
@@ -385,6 +460,8 @@ class Runner:
         if not cases:
             return []
         answers = self._exchange([{"op": "perform", "args": c} for c in cases], clock, hashseed)
+        for a in answers:
+            self.effects.update(a.get("effects") or ())
         return [a["out"] if a["ok"] else "\u26a0 " + a["out"] for a in answers]
 
 
@@ -865,6 +942,11 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
     blocked_ops = {p: o["blocked_by"] for p, o in ops.items() if o["blocked_by"]}
     if blocked_ops and len(blocked_ops) == len(ops):
         blockers.append("every operation depends on " + ", ".join(sorted({n for v in blocked_ops.values() for n in v})))
+    if runner.effects:
+        # the sandbox answered those calls with errors (no files, no network, no LLM), so a table of its answers would
+        # be a table of errors; these agents need a translation that reaches the same things in Power Platform
+        report["effects"] = sorted(runner.effects)
+        blockers.insert(0, "reaches beyond its arguments: " + ", ".join(EFFECTS[e] for e in sorted(runner.effects)))
     if blockers:
         report.update(reasons=list(dict.fromkeys(blockers)), runner_calls=runner.calls, operations=ops)
         return None, report

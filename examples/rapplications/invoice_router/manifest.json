@@ -1,0 +1,15 @@
+{
+  "schema": "rapp-application/1.0",
+  "id": "invoice_router",
+  "name": "Invoice Router",
+  "version": "1.0.0",
+  "type": "rapplication",
+  "publisher": "@brainfreeze",
+  "summary": "Routes one invoice to its queue and says whether it needs AP manager approval, against the approval limit the environment sets.",
+  "tagline": "Which queue does this invoice go to?",
+  "category": "finance",
+  "tags": ["invoices", "accounts-payable", "example"],
+  "singleton_filename": "invoice_router_agent.py",
+  "ui_filename": "index.html",
+  "license": "MIT"
+}

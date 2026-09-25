@@ -1,0 +1,39 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Invoice Router</title>
+<style>
+:root{--bg:#faf9f7;--fg:#1b1917;--dim:#6b625a;--line:#e5dfd7;--accent:#0369a1;--card:#fff;--code:#f3f0ec;--warn:#b45309;--ok:#15803d}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 ui-sans-serif,system-ui,sans-serif}
+.wrap{max-width:40rem;margin:0 auto;padding:2.5rem 1.25rem 4rem}h1{font-size:1.9rem;margin:0 0 .35rem;letter-spacing:-.02em}
+.lede{color:var(--dim);margin:0 0 2rem}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1.1rem;margin-bottom:1rem}
+label{display:block;font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:.3rem}
+input{width:100%;padding:.55rem .7rem;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);font:14px ui-monospace,monospace;margin-bottom:.9rem}
+button{background:var(--accent);color:#fff;border:0;padding:.6rem 1.1rem;border-radius:7px;font-weight:600;cursor:pointer}
+.queue{font-weight:700}.APPROVAL{color:var(--warn)}.AUTO-PAY{color:var(--ok)}.note{color:var(--dim);font-size:.85rem}
+</style></head><body><div class="wrap">
+<h1>Invoice Router</h1><p class="lede">Which queue does this invoice go to, and does it need sign-off?</p>
+<div class="card">
+<label for="vendor">Vendor</label><input id="vendor" value="Fabrikam" spellcheck="false">
+<label for="amount">Amount (USD)</label><input id="amount" value="18750" inputmode="decimal">
+<button id="go" onclick="route()">Route</button></div>
+<div id="out"></div>
+<script>
+const $ = s => document.querySelector(s);
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+async function route() {
+  const b = $('#go'); b.disabled = true; b.textContent = 'Routing…';
+  const vendor = $('#vendor').value.replace(/"/g, "'"), amount = $('#amount').value.trim();
+  try {
+    const r = await fetch('/chat', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_input: `Use the InvoiceRouter tool with vendor="${vendor}" amount=${amount}. Reply only DONE.`})});
+    const d = await r.json();
+    const line = String(d.agent_logs || '').split('\n').find(l => l.includes('queue')) || '';
+    const text = line.replace(/^\[InvoiceRouter\]\s*/, '');
+    const queue = (text.match(/queue ([A-Z-]+)/) || [])[1] || '';
+    $('#out').innerHTML = text
+      ? `<div class="card"><div class="queue ${esc(queue)}" id="queue">${esc(queue || 'routed')}</div><p id="result">${esc(text)}</p></div>`
+      : `<div class="card"><p id="result">${esc(d.response || 'no result')}</p></div>`;
+  } catch (e) {
+    $('#out').innerHTML = `<div class="card">Could not reach the brainstem.<p class="note">${esc(e.message)}</p></div>`;
+  } finally { b.disabled = false; b.textContent = 'Route'; }
+}
+</script></div></body></html>

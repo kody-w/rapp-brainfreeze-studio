@@ -237,12 +237,16 @@ def _serialize(node):
     return f"{node[1]}({', '.join(_serialize(a) for a in node[2])})"
 
 
-# pyFormatNumber(x, 'N<d>'): Python's f"{x:,.<d>f}" (round half to even) in plain expressions.
-# At an exact midpoint whose truncated digit is even, nudge x toward zero so formatNumber's
-# away-from-zero rounding lands where Python's half-to-even does.
-_PY_FORMAT = ("formatNumber(if(and(equals(mod(mul(<X>, <S>), 1), 0.5), equals(mod(sub(mul(<X>, <S>), 0.5), 2), 0)), "
-              "sub(<X>, <E>), if(and(equals(mod(mul(<X>, <S>), 1), -0.5), equals(mod(add(mul(<X>, <S>), 0.5), 2), 0)), "
-              "add(<X>, <E>), <X>)), <F>, 'en-US')")
+# pyFormatNumber(x, 'N<d>'): Python's f"{x:,.<d>f}" in plain expressions. Both round the double's exact binary
+# value, so they differ only on an exact tie, where formatNumber rounds away from zero and Python to even. A double
+# is an exact tie at <d> decimals only when x * 2^(d+1) is an odd integer (x = 0.125 at two decimals), and that
+# product is exact because the factor is a power of two. Testing x * 10^d for a .5 fraction is not enough: 11.005 is
+# 11.00500000000000078… in binary, so Python prints 11.01, yet 11.005 * 100 rounds to exactly 1100.5. At a true tie
+# whose truncated digit is even, the flow formats the truncated value instead (x * 10^d is exact there too), keeping
+# the sign of a negative value that truncates to zero, as Python prints -0.
+_PY_FORMAT = ("formatNumber(if(and(equals(mod(mul(<X>, <P>), 2), 1.0), equals(mod(sub(mul(<X>, <S>), 0.5), 2), 0)), "
+              "div(sub(mul(<X>, <S>), 0.5), <S>), if(and(equals(mod(mul(<X>, <P>), 2), -1.0), "
+              "equals(mod(add(mul(<X>, <S>), 0.5), 2), 0)), mul(div(sub(mul(<X>, -<S>), 0.5), <S>), -1.0), <X>)), <F>, 'en-US')")
 
 
 def _macro(node):
@@ -257,7 +261,7 @@ def _macro(node):
         if not m:
             raise StudioBuildError("pyFormatNumber needs a literal 'N<digits>' format")
         d = int(m.group(1))
-        text = (_PY_FORMAT.replace("<S>", str(10 ** d)).replace("<E>", f"{10.0 ** -(d + 3):.{d + 3}f}")
+        text = (_PY_FORMAT.replace("<S>", f"{10 ** d}.0").replace("<P>", str(2 ** (d + 1)))
                 .replace("<F>", _serialize(args[1])).replace("<X>", _serialize(args[0])))
         return _Parser(text).expr()
     return ("call", node[1], args)

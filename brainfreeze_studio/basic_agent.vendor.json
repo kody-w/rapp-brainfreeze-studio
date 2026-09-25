@@ -1,0 +1,7 @@
+{
+  "file": "basic_agent.py",
+  "source": "https://github.com/kody-w/rapp-installer/blob/brainstem-v0.6.9/rapp_brainstem/agents/basic_agent.py",
+  "tag": "brainstem-v0.6.9",
+  "sha256": "701488bc00d536a7b23295e7da99c62f24e9b00f233daa325886430c736b78eb",
+  "note": "Imported verbatim, never edited: the grail engine's BasicAgent (the hash RAPP's KERNEL_PIN.json pins). A rapplication egg carries only its agent.py, so building one supplies this base class, the one a brainstem host gives every agent."
+}

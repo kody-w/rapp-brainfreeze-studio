@@ -1,8 +1,12 @@
-"""python3 -m brainfreeze_studio build <egg> --name "..." --publisher-prefix rapp [--sdk-dir ...] [--out build/]"""
+"""python3 -m brainfreeze_studio build <egg> --name "..." --publisher-prefix rapp [--sdk-dir ...] [--out build/]
+python3 -m brainfreeze_studio rapplication @kody-w/agent_team --out out/ [--environment https://<org>.crm.dynamics.com/ --deploy]
+python3 -m brainfreeze_studio codeapp-host"""
 import argparse
 import json
 import os
+import subprocess
 import sys
+import time
 
 from . import StudioBuildError, build
 
@@ -32,7 +36,36 @@ def main(argv=None):
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=7700)
     sv.add_argument("--api-key", default=os.getenv("BRAINFREEZE_MCP_KEY"), help="required beyond loopback")
+    ra = sub.add_parser("rapplication", help="a RAPP Store rapplication (agent.py + UI) → Copilot Studio agent + "
+                                              "Power Apps code app")
+    ra.add_argument("ref", help="a store ref (@publisher/id or id), a bundle folder or zip, or a rapplication egg")
+    ra.add_argument("--store", default=None, help="the catalog root: an https URL or a RAPP_Store checkout "
+                                                  "(default: RAPP_Store main on GitHub)")
+    ra.add_argument("--out", default="rapplication", help="output folder (default rapplication/)")
+    ra.add_argument("--name", help="agent and app display name (default: the rapplication's name, 42 characters max)")
+    ra.add_argument("--publisher-prefix", default="rapp", help="solution publisher prefix (default rapp)")
+    ra.add_argument("--schema-name", help="default: <prefix>_<Name without spaces>")
+    ra.add_argument("--translations", help="folder of translation specs (agents that prove parity become flows)")
+    ra.add_argument("--sdk-dir", help="a copilot-harness-sdk checkout (for its proven infrastructure profiles)")
+    ra.add_argument("--rappid", help="the rappid to give the egg (default: minted once, then kept in --out)")
+    ra.add_argument("--environment", help="https://<org>.crm.dynamics.com/: where --deploy puts it")
+    ra.add_argument("--deploy", action="store_true", help="deploy as you: the agent, its flows and the code app, "
+                                                          "with your Azure CLI sign-in (az login)")
+    ra.add_argument("--no-app", action="store_true", help="with --deploy: leave the code app out")
+    ra.add_argument("--json", action="store_true", help="print the summary as JSON")
+    ch = sub.add_parser("codeapp-host", help="build the code app host once (needs node and npm)")
+    ch.add_argument("--build-dir", help="default: ~/.cache/brainfreeze-studio/codeapp-host-build")
     a = p.parse_args(argv)
+    if a.cmd == "codeapp-host":
+        from .codeapp import build_host
+        try:
+            print(f"host: {build_host(a.build_dir)}")
+        except (OSError, subprocess.CalledProcessError) as e:
+            print(f"brainfreeze-studio: the host build failed: {e}", file=sys.stderr)
+            return 1
+        return 0
+    if a.cmd == "rapplication":
+        return _rapplication(a)
     if a.cmd == "serve":
         from .mcp import McpApp, host_agents, make_server
         try:
@@ -64,6 +97,77 @@ def main(argv=None):
     for agent, p in prov.get("parity", {}).items():
         print(f"parity:      {agent} {p['passed']}/{p['cases']} {'PROVEN' if p['parity'] else 'FAILED'}")
     print(f"next:        deploy with copilot-harness-sdk: see {a.out}/provenance.json")
+    return 0
+
+
+def az_token(resource):
+    """A token for `resource` from the Azure CLI sign-in (az login; AZURE_CONFIG_DIR is honored), cached until close
+    to its expiry. The deploy runs as whoever that is."""
+    cached = _TOKENS.get(resource)
+    if cached and cached[1] - time.time() > 300:
+        return cached[0]
+    try:
+        out = subprocess.run(["az", "account", "get-access-token", "--resource", resource, "-o", "json"],
+                             capture_output=True, text=True, check=True).stdout
+    except FileNotFoundError:
+        raise SystemExit("brainfreeze-studio: --deploy signs in with the Azure CLI; install it and run az login")
+    except subprocess.CalledProcessError as e:
+        raise SystemExit(f"brainfreeze-studio: az couldn't get a token for {resource}: {e.stderr.strip()[:400]}")
+    body = json.loads(out)
+    _TOKENS[resource] = (body["accessToken"], float(body.get("expires_on") or time.time() + 1800))
+    return body["accessToken"]
+
+
+_TOKENS = {}
+
+
+def _rapplication(a):
+    from . import rapplication as rp
+    from .codeapp_publish import AUDIENCE, PublishError
+    from .deploy import DeployError
+    if a.deploy and not a.environment:
+        print("brainfreeze-studio: --deploy needs --environment https://<org>.crm.dynamics.com/", file=sys.stderr)
+        return 1
+    try:
+        s = rp.prepare(a.ref, a.out, name=a.name, publisher_prefix=a.publisher_prefix, schema_name=a.schema_name,
+                       store=a.store or rp.STORE, translations=a.translations, sdk_dir=a.sdk_dir, rappid=a.rappid,
+                       environment=a.environment)
+    except (StudioBuildError, rp.RapplicationError, FileNotFoundError) as e:
+        print(f"brainfreeze-studio: {e}", file=sys.stderr)
+        return 1
+    deployed = None
+    if a.deploy:
+        env = a.environment.rstrip("/") + "/"
+        try:
+            deployed = rp.deploy(a.out, env, lambda: az_token(env.rstrip("/")),
+                                 None if a.no_app else (lambda: az_token(AUDIENCE)), log=print)
+        except (DeployError, PublishError) as e:
+            print(f"brainfreeze-studio: {e}", file=sys.stderr)
+            return 1
+        s = json.loads(open(os.path.join(a.out, "rapplication.json")).read())
+    if a.json:
+        print(json.dumps(s, indent=2))
+        return 0
+    print(f"rapplication: {s['rapp']['publisher']}/{s['rapp']['id']} v{s['rapp']['version']}  ({s['rappid']})")
+    print(f"agent:        {s['agent']['schemaName']}  ({a.out}/workspace)")
+    for t in s["tools"]:
+        print(f"  {t['name']:<22} -> " + (f"flow for the app: {t['flow']['displayName']}" if t["flow"]
+                                          else "the agent answers the app"))
+    app = s.get("codeapp")
+    if app:
+        risks = app["report"].get("risks") or []
+        print(f"code app:     {app['displayName']}  ({a.out}/codeapp)" + (f"  {len(risks)} warning(s):" if risks else ""))
+        for r in risks:
+            print(f"  ! {r}")
+    else:
+        print("code app:     none (the rapplication ships no UI)")
+    if deployed:
+        d = s["deployed"]
+        print(f"maker:        {d.get('makerUrl')}")
+        if d.get("codeapp"):
+            print(f"play:         {d['codeapp']['playUrl']}")
+    else:
+        print(f"next:         --environment https://<org>.crm.dynamics.com/ --deploy")
     return 0
 
 

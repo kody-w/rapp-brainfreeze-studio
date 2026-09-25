@@ -13,3 +13,6 @@ dependencies = []
 
 [project.scripts]
 brainfreeze-studio = "brainfreeze_studio.__main__:main"
+
+[tool.setuptools.package-data]
+brainfreeze_studio = ["*.json", "codeapp_host/*.js", "codeapp_host/*.html", "codeapp_host/package.json"]

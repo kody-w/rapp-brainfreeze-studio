@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; }
+  #rapp { border: 0; width: 100%; height: 100%; display: block; }
+  #note { position: fixed; left: 12px; right: 12px; bottom: 12px; display: none; padding: 10px 14px; border-radius: 6px;
+          font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background: #fdecea; color: #611a15;
+          box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+</style>
+</head>
+<body>
+<iframe id="rapp" src="rapp/ui.html" title="__TITLE__"></iframe>
+<div id="note" role="status"></div>
+<script src="rapp-config.js"></script>
+<script src="host.js"></script>
+</body>
+</html>

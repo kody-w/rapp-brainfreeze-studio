@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>test player</title>
+<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style></head>
+<body>
+<iframe id="app" src="/app/index.html"></iframe>
+<script>
+  // The test's Power Apps player: it answers the stand-in SDK by asking the test server.
+  window.addEventListener("message", async (ev) => {
+    const d = ev.data;
+    if (!d || d.type !== "fake-sdk") return;
+    let result;
+    try {
+      const r = await fetch("/_sdk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(d) });
+      result = await r.json();
+    } catch (e) {
+      result = { success: false, error: { message: String(e) } };
+    }
+    ev.source.postMessage({ type: "fake-sdk:result", id: d.id, result }, "*");
+  });
+</script>
+</body>
+</html>

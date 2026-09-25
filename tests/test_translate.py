@@ -37,13 +37,38 @@ class ParityTests(unittest.TestCase):
         self.assertTrue(r["parity"], r["mismatches"][:3])
         self.assertEqual(r["cases"], len(SPEC["vectors"]) * 4)            # every vector × every limit setting
 
-    def test_plain_formatNumber_would_diverge_on_midpoints(self):
-        """The gate catches .NET's away-from-zero rounding against Python's half-to-even."""
+    def test_plain_formatNumber_would_diverge_on_exact_ties(self):
+        """The gate catches .NET's away-from-zero rounding against Python's half-to-even, which differ only where
+        the double is exactly halfway (0.125 at two decimals)."""
         spec = json.loads(json.dumps(SPEC).replace("pyFormatNumber(step('amount'), 'N2')",
                                                    "formatNumber(step('amount'), 'N2', 'en-US')"))
         r = flows.prove(spec, AGENT, "rapp_InvoiceDesk")
         self.assertFalse(r["parity"])
-        self.assertTrue(all(m["args"]["amount"] == 0.125 for m in r["mismatches"]))
+        self.assertEqual({m["args"]["amount"] for m in r["mismatches"]}, {0.125, -0.125})
+
+    def test_a_tie_test_on_the_rounded_product_would_diverge_just_above_ties(self):
+        """11.005 is 11.00500000000000078… in binary, so Python prints 11.01; 11.005 * 100 still rounds to exactly
+        1100.5, so treating that product's .5 fraction as a tie rounds it to even, 11.00. (Found by the code app
+        test, which typed 18750.005 into the Invoice Router UI.)"""
+        x = "step('amount')"
+        naive = (f"formatNumber(if(and(equals(mod(mul({x}, 100), 1), 0.5), equals(mod(sub(mul({x}, 100), 0.5), 2), 0)), "
+                 f"sub({x}, 0.00001), if(and(equals(mod(mul({x}, 100), 1), -0.5), equals(mod(add(mul({x}, 100), 0.5), 2), 0)), "
+                 f"add({x}, 0.00001), {x})), 'N2', 'en-US')")
+        spec = json.loads(json.dumps(SPEC).replace("pyFormatNumber(step('amount'), 'N2')", naive.replace("'", "\u0027")))
+        r = flows.prove(spec, AGENT, "rapp_InvoiceDesk")
+        self.assertFalse(r["parity"])
+        self.assertEqual({m["args"]["amount"] for m in r["mismatches"]}, {11.005, 18750.005})
+
+    def test_pyFormatNumber_is_python_formatting_on_every_kind_of_value(self):
+        import random
+        rnd = random.Random(7)
+        values = ([float(f"{n}.005") for n in range(0, 2000)] + [n / 8 for n in range(-200, 200)] + [-0.5, -0.0, 2.5]
+                  + [rnd.uniform(-1e6, 1e6) for _ in range(500)] + [round(rnd.uniform(-1e5, 1e5), 3) for _ in range(500)])
+        ctx = {"trigger": {}, "outputs": {}, "parameters": {}, "now": "2026-09-24T00:00:00"}
+        for d in (0, 1, 2, 3):
+            for v in values:
+                node = flows._macro(flows._Parser(f"pyFormatNumber({v!r}, 'N{d}')").expr())
+                self.assertEqual(flows._eval(node, ctx), f"{v:,.{d}f}", (v, d))
 
     def test_a_wrong_rule_fails_the_gate(self):
         spec = copy.deepcopy(SPEC)
