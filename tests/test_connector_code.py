@@ -390,6 +390,14 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(cc.files_body(self.FILES_SPEC, cases[4]), {"path": {"path": None, "content": None},
                                                                    "other": {"path": None, "content": None}})
 
+    def test_connector_names_fit_dataverse(self):
+        self.assertEqual(cc.connector_name("rapp_JSONDoctor", {"agent": "JsonDoctor"})[0], "JSONDoctor JsonDoctor code")
+        self.assertEqual(cc.connector_name("rapp_rappgodForum", {"agent": "ForumAgent"})[0], "rappgodForum ForumAgent code")
+        self.assertEqual(cc.connector_name("rapp_JSONDoctorCloud", {"agent": "JsonDoctor"})[0], "JSONDoctorCloud code")
+        long = cc.connector_name("rapp_AVeryLongAgentNameForTheDesk", {"agent": "InvoiceRouter"})[0]
+        self.assertLessEqual(len(long), 30)
+        self.assertTrue(long.endswith(" code"))
+
     def test_only_paths_inside_the_folder_are_read(self):
         for path, inside in [("data/a.json", True), ("a.json", True), ("x/./a.json", True), ("..a.json", True),
                              ("../a.json", False), ("/a.json", False), ("x/../../a.json", False),

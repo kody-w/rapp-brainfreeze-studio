@@ -512,9 +512,16 @@ STATE_PREFIX = "rapp-workspace"
 CONNECTOR_PLACEHOLDER = "{{CONNECTOR:%s}}"          # the connector's internal id, known once it exists
 
 
+MAX_CONNECTOR_DISPLAY = 30        # Dataverse refuses a longer one ("Connector name cannot be longer than 30 characters")
+
+
 def connector_name(schema_name, spec):
     """The connector's display name (its internal id derives from it) and its Dataverse name."""
-    display = f"{schema_name.split('_', 1)[-1]} {spec['agent']} code"[:60]
+    short, agent = schema_name.split("_", 1)[-1], spec["agent"]
+    display = f"{short} {agent} code"
+    if len(display) > MAX_CONNECTOR_DISPLAY:
+        base = short if agent.lower() in short.lower() else f"{short} {agent}"
+        display = base[:MAX_CONNECTOR_DISPLAY - len(" code")].rstrip() + " code"
     return display, f"{schema_name.split('_', 1)[0]}_{re.sub(r'[^a-z0-9]', '', (schema_name.split('_', 1)[-1] + spec['agent']).lower())}code"[:60]
 
 
