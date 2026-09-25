@@ -492,7 +492,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
             if f.name.endswith(".proof.json"):             # a recorded proof, read beside its spec
                 continue
             spec = json.loads(f.read_text())
-            spec["_dir"] = str(f.parent)
+            spec["_dir"], spec["_file"] = str(f.parent), f.name
             specs[spec["agent"]] = spec
             if spec.get("class"):
                 specs.setdefault(spec["class"], spec)
@@ -511,11 +511,13 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                     live.append(a["contract"]["name"])
                     routing.append(f"code:{spec['flow_name']}")
                 continue
-            if not run_proofs:
+            materialized = spec.get("mode") == "materialized"
+            if not run_proofs and not materialized:
                 a["note"] = "its translation is proven by running the agent's code, which isn't allowed here"
                 continue
-            materialized = spec.get("mode") == "materialized"
+            report = None
             if materialized:
+                from .flows import materialized_record_file, pinned_data, recorded_materialized_proof
                 digest = hashlib.sha256(a["source"].encode("utf-8")).hexdigest()
                 if digest != spec.get("source_sha256"):
                     a["note"] = (f"materialized translation is for different code (sha256 {spec.get('source_sha256', '?')[:12]}, "
@@ -524,19 +526,29 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                 if basic_source is None:
                     a["note"] = "materialized translation needs the egg's agents/basic_agent.py for its proof"
                     continue
-            with tempfile.TemporaryDirectory() as tmp:
-                agent_file = Path(tmp) / Path(a["file"]).name
-                agent_file.write_text(a["source"])
-                basic_file = None
-                if materialized:
-                    basic_file = Path(tmp) / "basic_agent.py"
-                    basic_file.write_bytes(basic_source)
-                    # the egg's other agents beside it, as in its brainstem: an agent may load a sibling
-                    for other, octets in files.items():
-                        if other.startswith("agents/") and other.count("/") == 1 and other.endswith(".py") \
-                                and not (Path(tmp) / Path(other).name).exists():
-                            (Path(tmp) / Path(other).name).write_bytes(octets)
-                report = prove(spec, agent_file, schema_name, basic_file=basic_file)
+                # proven here when it can be (agent code may run, and its pinned data is here); else only on a proof
+                # recorded for these exact bytes (a hosted service runs no agent code and holds no one's dataset)
+                why = "no agent code may run here" if not run_proofs else (pinned_data(spec)[1] if spec.get("data") else None)
+                if why:
+                    report = recorded_materialized_proof(spec, digest, hashlib.sha256(basic_source).hexdigest())
+                    if report is None:
+                        a["note"] = (f"its materialized translation can't be proven here ({why}) and no proof was "
+                                     f"recorded for these exact bytes ({materialized_record_file(spec).name})")
+                        continue
+            if report is None:
+                with tempfile.TemporaryDirectory() as tmp:
+                    agent_file = Path(tmp) / Path(a["file"]).name
+                    agent_file.write_text(a["source"])
+                    basic_file = None
+                    if materialized:
+                        basic_file = Path(tmp) / "basic_agent.py"
+                        basic_file.write_bytes(basic_source)
+                        # the egg's other agents beside it, as in its brainstem: an agent may load a sibling
+                        for other, octets in files.items():
+                            if other.startswith("agents/") and other.count("/") == 1 and other.endswith(".py") \
+                                    and not (Path(tmp) / Path(other).name).exists():
+                                (Path(tmp) / Path(other).name).write_bytes(octets)
+                    report = prove(spec, agent_file, schema_name, basic_file=basic_file)
             proofs[a["contract"]["name"]] = report
             (out / "parity" / f"{spec['flow_name']}.json").write_text(json.dumps(
                 {k: v for k, v in report.items() if k not in ("flow_json", "_all")}, indent=2) + "\n")

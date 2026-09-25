@@ -291,5 +291,60 @@ class PinnedDataTests(unittest.TestCase):
         self.assertNotIn("HH-1730", keying["sku"].get("values") or [])  # why values= exists: name them from the data
 
 
+class RecordedMaterializedProofTests(unittest.TestCase):
+    """A hosted build (the Azure Function) holds no one's dataset and may run no agent code: it lays a materialized
+    flow only on a proof recorded, where the data is, for the exact agent, BasicAgent and spec."""
+
+    def setUp(self):
+        import json
+        import shutil
+        from brainfreeze_studio import rapp1
+        from brainfreeze_studio.flows import record_materialized
+        self.work = Path(tempfile.mkdtemp(prefix="bf-recorded-", dir=TMP))
+        self.folder = catalog_folder()
+        spec, _ = materialize(CATALOG_AGENT, BASIC, data={"CATALOG_DIR": self.folder},
+                              values={"sku": ["CAB-288", "HH-1730"]})
+        self.translations = self.work / "translations"
+        self.translations.mkdir()
+        (self.translations / "catalog.json").write_text(json.dumps(spec))
+        spec["_dir"], spec["_file"] = str(self.translations), "catalog.json"
+        proof = prove_materialized(spec, CATALOG_AGENT, BASIC)
+        record = record_materialized(spec, proof, hashlib.sha256(BASIC.read_bytes()).hexdigest(), "2026-09-25")
+        (self.translations / "catalog.proof.json").write_text(json.dumps(record))
+        rid = "rappid:@example/catalog-desk:" + "e" * 64
+        files = {"rappid.json": rapp1.canonical({"schema": "rapp/1", "rappid": rid}).encode(),
+                 "soul.md": b"You are the catalog desk.\n", "agents/catalog_agent.py": CATALOG.encode(),
+                 "agents/basic_agent.py": BASIC.read_bytes()}
+        self.egg = self.work / "catalog.egg"
+        self.egg.write_bytes(rapp1.pack_egg("organism", rid, "2026-09-25T12:00:00.000Z", files=files,
+                                            payload={"engine": {"name": "rapp-brainstem", "version": "0.6.16"}}))
+        shutil.rmtree(self.folder)                              # as in the service: the dataset isn't there
+
+    def build(self, **kw):
+        import brainfreeze_studio as bs
+        out = Path(tempfile.mkdtemp(prefix="bf-recorded-out-", dir=self.work))
+        r = bs.build(self.egg, out, "Catalog Desk", "rapp", translations=self.translations, **kw)
+        return r["agents"][0], out
+
+    def test_without_its_data_the_flow_is_laid_on_the_recorded_proof(self):
+        import json
+        agent, out = self.build()
+        self.assertEqual(agent["as"], "agent flow (materialized, parity proven)", agent.get("note"))
+        parity = json.loads((out / "parity" / "CatalogFlow.json").read_text())
+        self.assertEqual((parity["recorded"], parity["passed"], parity["cases"] > 0), ("2026-09-25", parity["cases"], True))
+        self.assertEqual(self.build(run_proofs=False)[0]["as"], "agent flow (materialized, parity proven)")
+
+    def test_a_record_for_other_bytes_or_no_record_is_refused(self):
+        import json
+        spec = json.loads((self.translations / "catalog.json").read_text())
+        spec["description"] += " Edited."
+        (self.translations / "catalog.json").write_text(json.dumps(spec))
+        agent, _ = self.build()
+        self.assertIn("no proof was recorded for these exact bytes (catalog.proof.json)", agent["note"])
+        self.assertIn("isn't here", agent["note"])
+        (self.translations / "catalog.proof.json").unlink()
+        self.assertIn("can't be proven here (no agent code may run here)", self.build(run_proofs=False)[0]["note"])
+
+
 if __name__ == "__main__":
     unittest.main()

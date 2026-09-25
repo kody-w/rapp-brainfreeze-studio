@@ -59,8 +59,9 @@ def main(argv=None):
                     "environment's RAPP Files Site, else your tenant's root site)")
     ra.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
     ra.add_argument("--json", action="store_true", help="print the summary as JSON")
-    pr = sub.add_parser("record-proof", help="prove a connector-code port against its agent.py and record the proof "
-                        "beside its spec, so builds without the .NET SDK (or that run no agent code) can lay it")
+    pr = sub.add_parser("record-proof", help="prove a connector-code port or a materialized spec against its agent.py "
+                        "and record the proof beside the spec, so builds that can't run it (no .NET SDK, no pinned "
+                        "data, or no agent code allowed, as in a hosted service) can lay it")
     pr.add_argument("spec", help="the port's spec, for example translations/json_doctor.json")
     pr.add_argument("agent", help="the agent.py it ports")
     pr.add_argument("--basic", help="the BasicAgent it runs beside (default: this package's, as rapplication builds use)")
@@ -156,14 +157,27 @@ def _record_proof(a):
         print(f"brainfreeze-studio: the spec is for other code (sha256 {spec['source_sha256'][:12]}, "
               f"{a.agent} has {digest[:12]})", file=sys.stderr)
         return 1
-    try:
-        report = cc.prove(spec, a.agent, basic, spec_file.parent / spec["script"], python=agent_python(spec.get("python")))
-        rec = cc.record(spec, report, digest, hashlib.sha256(basic.read_bytes()).hexdigest(), time.strftime("%Y-%m-%d"))
-    except cc.ConnectorCodeError as e:
-        print(f"brainfreeze-studio: {e}", file=sys.stderr)
-        return 1
-    cc.proof_record_file(spec).write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
-    print(f"{spec['agent']}: {report['passed']}/{report['cases']} proven; recorded in {cc.proof_record_file(spec)}")
+    spec["_file"] = spec_file.name
+    if spec.get("mode") == "materialized":
+        # proven on its pinned data, beside the agent's siblings (an agent may load them)
+        from .flows import StudioBuildError, materialized_record_file, prove_materialized, record_materialized
+        report = prove_materialized(spec, a.agent, basic)
+        try:
+            rec = record_materialized(spec, report, hashlib.sha256(basic.read_bytes()).hexdigest(), time.strftime("%Y-%m-%d"))
+        except StudioBuildError as e:
+            print(f"brainfreeze-studio: {e}" + (f": {report['reason']}" if report.get("reason") else ""), file=sys.stderr)
+            return 1
+        target = materialized_record_file(spec)
+    else:
+        try:
+            report = cc.prove(spec, a.agent, basic, spec_file.parent / spec["script"], python=agent_python(spec.get("python")))
+            rec = cc.record(spec, report, digest, hashlib.sha256(basic.read_bytes()).hexdigest(), time.strftime("%Y-%m-%d"))
+        except cc.ConnectorCodeError as e:
+            print(f"brainfreeze-studio: {e}", file=sys.stderr)
+            return 1
+        target = cc.proof_record_file(spec)
+    target.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+    print(f"{spec['agent']}: {report['passed']}/{report['cases']} proven; recorded in {target}")
     return 0
 
 

@@ -702,6 +702,43 @@ def pinned_data(spec):
     return found, None
 
 
+def materialized_record_file(spec):
+    """Where a materialized spec's recorded proof lives: beside the spec, <spec file stem>.proof.json."""
+    return Path(spec["_dir"]) / (Path(spec.get("_file") or f"{spec['flow_name']}.json").stem + ".proof.json")
+
+
+def record_materialized(spec, report, basic_sha256, when):
+    """What a passing materialized proof leaves behind, pinned to the exact bytes it held for: the agent's source, its
+    BasicAgent, the spec (which pins the dataset's digest). A build that can't run the proof (no dataset there, or no
+    agent code may run, as in a hosted service) lays the flow only on this record."""
+    from .connector_code import spec_sha256
+    if not report.get("parity"):
+        raise StudioBuildError(f"only a passing proof is recorded ({report.get('passed')}/{report.get('cases')})")
+    return {"agent": spec["agent"], "mode": "materialized", "source_sha256": spec["source_sha256"],
+            "basic_sha256": basic_sha256, "spec_sha256": spec_sha256(spec),
+            "data": {k: v["sha256"] for k, v in (spec.get("data") or {}).items()},
+            "cases": report["cases"], "passed": report["passed"], "clocks": report.get("clocks"),
+            "python": report.get("python"), "parity": True, "proven": when}
+
+
+def recorded_materialized_proof(spec, source_sha256, basic_sha256):
+    """The proof recorded for these exact bytes, as a report like prove_materialized's (with `recorded`: its date), or
+    None when there is none or it was for other code, another BasicAgent or another spec (or dataset)."""
+    from .connector_code import spec_sha256
+    f = materialized_record_file(spec)
+    if not f.is_file():
+        return None
+    rec = json.loads(f.read_text(encoding="utf-8"))
+    if not (rec.get("parity") and rec.get("mode") == "materialized" and rec.get("source_sha256") == source_sha256
+            and rec.get("basic_sha256") == basic_sha256 and rec.get("spec_sha256") == spec_sha256(spec)):
+        return None
+    return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": rec["cases"], "passed": rec["passed"],
+            "parity": True, "mode": "materialized", "recorded": rec["proven"], "clocks": rec.get("clocks"),
+            "python": rec.get("python"), "mismatches": [], "blocked_operations": spec.get("blocked_operations") or {},
+            "approximated_inputs": [k["input"] for k in spec["keying"] if k.get("approximated")],
+            **({"data": rec["data"]} if rec.get("data") else {})}
+
+
 def prove_materialized(spec, agent_file, basic_file, schema_name=None):
     """Every vector through the real agent.py (sandboxed, same frozen clock) and through the compiled flow. A spec
     materialized over pinned data is proven on that exact data, or refused."""
