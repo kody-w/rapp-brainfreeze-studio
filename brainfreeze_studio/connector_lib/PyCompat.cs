@@ -258,13 +258,52 @@ public static class PyJson
         WriteString(sb, v.ToString());
     }
 
+    // json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    public static string Canonical(JToken v)
+    {
+        var sb = new StringBuilder();
+        WriteCanonical(sb, v);
+        return sb.ToString();
+    }
+
+    static void WriteCanonical(StringBuilder sb, JToken v)
+    {
+        if (v is JObject o)
+        {
+            sb.Append('{');
+            bool first = true;
+            foreach (var p in o.Properties().OrderBy(p => p.Name, StringComparer.Ordinal))
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                WriteString(sb, p.Name, false);
+                sb.Append(':');
+                WriteCanonical(sb, p.Value);
+            }
+            sb.Append('}');
+            return;
+        }
+        if (v is JArray a)
+        {
+            sb.Append('[');
+            for (int i = 0; i < a.Count; i++) { if (i > 0) sb.Append(','); WriteCanonical(sb, a[i]); }
+            sb.Append(']');
+            return;
+        }
+        if (v != null && v.Type == JTokenType.String) { WriteString(sb, (string)v, false); return; }
+        Write(sb, v, null, 0);
+    }
+
     static void Newline(StringBuilder sb, int? indent, int level)
     {
         if (indent == null) return;
         sb.Append('\n').Append(' ', indent.Value * level);
     }
 
-    public static void WriteString(StringBuilder sb, string s)
+    public static void WriteString(StringBuilder sb, string s) { WriteString(sb, s, true); }
+
+    // ensure_ascii=False keeps every character but '"', '\\' and the controls, which it escapes
+    public static void WriteString(StringBuilder sb, string s, bool asciiOnly)
     {
         sb.Append('"');
         foreach (char c in s)
@@ -279,7 +318,7 @@ public static class PyJson
                 case '\b': sb.Append("\\b"); break;
                 case '\f': sb.Append("\\f"); break;
                 default:
-                    if (c < ' ' || c > '~') sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    if (c < ' ' || (asciiOnly && c > '~')) sb.Append("\\u").Append(((int)c).ToString("x4"));
                     else sb.Append(c);
                     break;
             }
@@ -466,6 +505,46 @@ public static class PyJson
                 i = SkipWs(i + 1);
             }
         }
+    }
+}
+
+// urllib.request.urlopen as agents use it: a status of 400 or more raises HTTPError ("HTTP Error 403: Forbidden").
+public static class PyHttp
+{
+    public static async Task<string> Open(IScriptContext context, CancellationToken cancel, string method, string url,
+                                          string jsonBody = null)
+    {
+        var request = new HttpRequestMessage(new HttpMethod(method), url);
+        if (jsonBody != null) request.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+        HttpResponseMessage response;
+        try { response = await context.SendAsync(request, cancel).ConfigureAwait(false); }
+        catch (HttpRequestException e) { throw new PyException("URLError", "<urlopen error " + e.Message + ">"); }
+        int code = (int)response.StatusCode;
+        if (code >= 400)
+            throw new PyException("HTTPError", "HTTP Error " + code + ": " + (response.ReasonPhrase ?? ""));
+        var bytes = response.Content == null ? new byte[0] : await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+        return new UTF8Encoding(false).GetString(bytes);
+    }
+
+    // json.loads(urlopen(...).read())
+    public static async Task<JToken> Json(IScriptContext context, CancellationToken cancel, string method, string url,
+                                          string jsonBody = null)
+    {
+        return PyJson.Loads(await Open(context, cancel, method, url, jsonBody).ConfigureAwait(false));
+    }
+}
+
+public static class PyBase64
+{
+    // base64.urlsafe_b64encode(data).decode().rstrip("=")
+    public static string UrlSafeNoPad(byte[] data)
+    {
+        return Convert.ToBase64String(data).Replace('+', '-').Replace('/', '_').TrimEnd('=');
+    }
+
+    public static byte[] Sha256Utf8(string text)
+    {
+        using (var sha = System.Security.Cryptography.SHA256.Create()) return sha.ComputeHash(new UTF8Encoding(false).GetBytes(text));
     }
 }
 

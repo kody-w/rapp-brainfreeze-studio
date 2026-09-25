@@ -15,7 +15,9 @@ The contract between a flow and the code (one operation, `Run`, POST):
     response {"output": "<what perform() returns>", "state": {"<file>": "<new text>"}}   (only the files it wrote)
 
 `state` carries the files an agent keeps through the RAPP workspace contract (`workspace_read`, `workspace_write`); the
-flow reads and writes them as Dataverse notes. `now` and `id` are the flow's `utcNow()` and `guid()`, so the code is a
+flow reads and writes them as Dataverse notes. An agent that calls the network does it from the code itself
+(`this.Context.SendAsync`, as the Hacker News connector does); its proof replays recorded responses to both sides,
+the Python's `urllib.request.urlopen` included. `now` and `id` are the flow's `utcNow()` and `guid()`, so the code is a
 pure function of its request and a proof can fix them. A proof case is a sequence of calls: state carries from one call
 to the next, in both runs. Compiling needs the .NET SDK (`dotnet`); the first build restores Newtonsoft.Json from
 NuGet.
@@ -95,8 +97,8 @@ class ProofContext : IScriptContext
         var status = (int)recorded["status"];
         var response = new HttpResponseMessage((HttpStatusCode)status);
         response.ReasonPhrase = (string)recorded["reason"] ?? response.ReasonPhrase;
-        response.Content = new StringContent((string)recorded["body"] ?? "", Encoding.UTF8,
-                                             (string)recorded["contentType"] ?? "application/json");
+        var mediaType = ((string)recorded["contentType"] ?? "application/json").Split(';')[0].Trim();
+        response.Content = new StringContent((string)recorded["body"] ?? "", Encoding.UTF8, mediaType);
         response.RequestMessage = request;
         return Task.FromResult(response);
     }
@@ -186,7 +188,8 @@ def compile_script(script):
     (build / "ConnectorProof.csproj").write_text(PROJECT.replace("{framework}", framework))
     (build / "Stubs.cs").write_text(STUBS)
     (build / "Program.cs").write_text(PROGRAM)
-    own = [line for line in script.splitlines() if line.lstrip().startswith("using ") and line.rstrip().endswith(";")]
+    # a script's own using directives (not using statements inside its methods)
+    own = [line for line in script.splitlines() if re.match(r"^using\s+[A-Za-z_][\w.]*(\s*=\s*[\w.]+)?\s*;\s*$", line)]
     body = "\n".join(line for line in script.splitlines() if line not in own)
     (build / "Script.cs").write_text(USINGS + "\n".join(u for u in own if u.strip() not in USINGS) + "\n" + body + "\n")
     p = subprocess.run(["dotnet", "build", "-c", "Release", "-o", "out", "-nologo", "-v", "quiet"], cwd=build,
@@ -210,11 +213,49 @@ def run_script(dll, cases):
 # ── the Python side: the real agent, with its workspace, clock and ids fixed per call ───────────────────────────
 
 PY_RUNNER = r'''
-import datetime as _dt, importlib.util, json, sys, types, uuid
+import datetime as _dt, importlib.abc, importlib.util, io, json, sys, types, urllib.error, urllib.request, uuid
 
 agent_file, basic_file = sys.argv[1:3]
+hidden = set(json.loads(sys.argv[3])) if len(sys.argv) > 3 else set()
 _now = [None]
 _ids = []
+_responses = {}
+_fetched = []
+
+# Modules the proof hides, so the agent takes the path it takes without them (the connector has no keys to sign with)
+class _Hide(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in hidden:
+            raise ImportError(f"No module named {name!r}")
+        return None
+sys.meta_path.insert(0, _Hide())
+
+# The network, replayed: every request must have a recorded response, as the connector code's proof does it
+class _Recorded(io.BytesIO):
+    def __init__(self, url, rec):
+        super().__init__(rec["body"].encode("utf-8"))
+        self.url, self.status, self.reason, self.code = url, rec["status"], rec.get("reason") or "", rec["status"]
+        self.headers = {"Content-Type": rec.get("contentType") or "application/json"}
+    def getcode(self):
+        return self.status
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+def _urlopen(req, data=None, timeout=None, **kw):
+    url = req if isinstance(req, str) else req.full_url
+    method = "GET" if isinstance(req, str) else req.get_method()
+    key = f"{method} {url}"
+    _fetched.append(key)
+    rec = _responses.get(key)
+    if rec is None:
+        raise RuntimeError(f"the proof has no recorded response for {key}")
+    if rec["status"] >= 400:
+        raise urllib.error.HTTPError(url, rec["status"], rec.get("reason") or "", rec.get("headers") or {},
+                                     io.BytesIO(rec["body"].encode("utf-8")))
+    return _Recorded(url, rec)
+urllib.request.urlopen = _urlopen
 
 class _Frozen(_dt.datetime):
     @classmethod
@@ -251,6 +292,8 @@ for line in sys.stdin:
         written[key] = text
     _now[0] = case["now"]
     _ids[:] = case["ids"]
+    _responses.clear()
+    _responses.update(case.get("responses") or {})
     args = dict(case["args"])
     if case.get("workspace"):
         args["_context"] = {"workspace_read": workspace_read, "workspace_write": workspace_write}
@@ -312,8 +355,8 @@ def prove(spec, agent_file, basic_file, script_file, python=None):
     tmp = tempfile.mkdtemp(prefix="bfs-connector-proof-")
     runner = Path(tmp) / "runner.py"
     runner.write_text(PY_RUNNER)
-    py = _Session([python or sys.executable, str(runner), str(agent_file), str(basic_file)],
-                  env={**os.environ, "PYTHONHASHSEED": "0"})
+    py = _Session([python or sys.executable, str(runner), str(agent_file), str(basic_file),
+                   json.dumps(spec.get("hide_modules") or [])], env={**os.environ, "PYTHONHASHSEED": "0"})
     cs = _Session(["dotnet", str(dll)])
     results = []
     try:
@@ -323,9 +366,10 @@ def prove(spec, agent_file, basic_file, script_file, python=None):
             for k, call in enumerate(sequence):
                 now = call.get("now") or spec.get("now") or "2026-09-25T10:00:00Z"
                 ident = call.get("id") or f"00000000-0000-4000-8000-{n:04x}{k:08x}"
+                responses = {**(spec.get("responses") or {}), **(call.get("responses") or {})}
                 out_py = py.ask({"args": call["args"], "state": py_state, "now": now, "ids": derived_ids(ident, 64),
-                                 "workspace": workspace})
-                raw = cs.ask({"operationId": spec.get("operation", "Run"), "responses": call.get("responses") or {},
+                                 "workspace": workspace, "responses": responses})
+                raw = cs.ask({"operationId": spec.get("operation", "Run"), "responses": responses,
                               "body": {"args": call["args"], "state": cs_state, "now": now, "id": ident}})
                 try:
                     out_cs = json.loads(raw["body"]) if raw["status"] == 200 else {

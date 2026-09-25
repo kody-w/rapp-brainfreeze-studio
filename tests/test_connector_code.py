@@ -168,6 +168,46 @@ class ThoughtboxTests(unittest.TestCase):
         self.assertTrue(all("(no entries)" in m["python"]["output"] for m in r["mismatches"]))
 
 
+FORUM = Path(STORE, "apps", "@kody-w", "rapp_god_forum", "singleton", "forum_agent.py") if STORE else None
+
+
+@unittest.skipUnless(HAVE_DOTNET and FORUM and FORUM.is_file(), "needs dotnet and a RAPP_Store checkout (BFS_RAPP_STORE)")
+class ForumTests(unittest.TestCase):
+    """A network agent: the code makes its own HTTP calls; the proof replays recorded responses to both sides."""
+
+    def setUp(self):
+        self.spec = json.loads((ROOT / "translations" / "forum.json").read_text())
+
+    def prove(self, spec, script=ROOT / "translations" / "forum.csx"):
+        return cc.prove(spec, FORUM, ROOT / "brainfreeze_studio" / "basic_agent.py", script, python=python311())
+
+    def test_the_port_matches_the_python_on_every_recorded_response(self):
+        r = self.prove(self.spec)
+        self.assertTrue(r["parity"], json.dumps(r["mismatches"][:2])[:2000])
+        notes = [c.get("note") for c in self.spec["sequences"][0]]
+        self.assertIn("live: the forum's host is stopped (403)", notes)
+
+    def test_a_response_the_proof_did_not_record_fails_it(self):
+        spec = json.loads(json.dumps(self.spec))
+        call = next(c for c in spec["sequences"][0] if c.get("note") == "topics and replies")
+        call["responses"] = {k: v for k, v in call["responses"].items() if "neighborhood" in k}
+        spec["sequences"] = [[call]]
+        self.assertFalse(self.prove(spec)["parity"])
+
+    def test_the_python_really_takes_the_path_without_its_key(self):
+        spec = json.loads(json.dumps(self.spec))
+        spec["hide_modules"] = []
+        spec["sequences"] = [[{"args": {"action": "whoami"}}]]
+        r = self.prove(spec)
+        try:
+            import importlib.util
+            have = subprocess.run([python311(), "-c", "import cryptography"], capture_output=True).returncode == 0
+        except OSError:
+            have = False
+        if have:                                  # with the package the Python mints a key; the port can't
+            self.assertFalse(r["parity"])
+
+
 class FlowTests(unittest.TestCase):
     def test_the_flow_reads_runs_and_saves_the_workspace(self):
         flow = cc.compile_flow(SPEC, "rapp_Thoughtbox", "Thoughtbox", "Thoughtbox Thoughtbox code", "shared_rapp_code_x")
