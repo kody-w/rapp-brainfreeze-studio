@@ -28,7 +28,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from auth import UserToken
+from auth import POWERAPPS_SCOPE, ConsentRequired, UserToken
 
 CONTAINER = "bfs-deploy-jobs"
 QUEUE = "bfs-deploy-jobs"
@@ -147,9 +147,26 @@ def _extract(blob_b64, dest):
         z.extractall(dest)
 
 
+def powerapps_token(request, client_id, tenant, opener=None):
+    """The user's token for publishing a code app: the one the request carries, else one got with their refresh
+    token. Returns (get_token, why_not): no token and the reason when the user hasn't allowed it (yet)."""
+    given = request.get("powerapps_token")
+    if given:
+        return UserToken(given, None), None
+    if not (request.get("refresh_token") and client_id):
+        return None, "this sign-in can't publish Power Apps (no refresh token)"
+    token = UserToken(None, None, request["refresh_token"], client_id, tenant, opener=opener, scope=POWERAPPS_SCOPE)
+    try:
+        token()
+    except ConsentRequired as e:
+        return None, f"consent: {e}"
+    return token, None
+
+
 def run_job(job_id, store, build, deploy, *, sdk_dir, client_id=None, tenant="organizations",
-            allow_translations=False, flush_every=3.0):
-    """Run one queued job end to end. Never raises: the outcome is written to the job's status."""
+            allow_translations=False, flush_every=3.0, host_js=None, rapplications=None, opener=None):
+    """Run one queued job end to end. Never raises: the outcome is written to the job's status. A request with a
+    `rapplication` deploys its agent, its flows and its code app (brainfreeze_studio.rapplication)."""
     status = store.get(f"{job_id}/status.json") or {"job": job_id, "log": []}
     log = status.setdefault("log", [])
     last = [0.0]
@@ -179,6 +196,45 @@ def run_job(job_id, store, build, deploy, *, sdk_dir, client_id=None, tenant="or
         token = UserToken(request["access_token"], environment, request.get("refresh_token"), client_id, tenant)
         token()                                  # fails fast when the sign-in has already expired
         work = Path(tempfile.mkdtemp(prefix="bfs-job-"))
+        if request.get("rapplication"):
+            if rapplications is None:
+                from brainfreeze_studio import rapplication as rapplications
+            if request.get("translations") and not allow_translations:
+                raise ValueError("translations run the rapplication's code for their parity proof; this deployment "
+                                 "has them off (BFS_ALLOW_TRANSLATIONS)")
+            tdir = None
+            if request.get("translations"):
+                tdir = work / "translations"
+                tdir.mkdir()
+                for i, spec in enumerate(request["translations"]):
+                    (tdir / f"{i:03d}.json").write_text(json.dumps(spec))
+            say(f"preparing {request['rapplication']}: its agent, the flows its app calls, and the app")
+            summary = rapplications.prepare(request["rapplication"], work / "out", name=request.get("displayName") or None,
+                                            publisher_prefix=request.get("publisherPrefix") or "rapp",
+                                            schema_name=request.get("schemaName") or None,
+                                            store=request.get("store") or rapplications.STORE, sdk_dir=str(sdk_dir),
+                                            environment=environment, translations=str(tdir) if tdir else None,
+                                            host_js=host_js)
+            warnings = ((summary.get("codeapp") or {}).get("report") or {}).get("risks") or []
+            say(f"prepared {summary['agent']['schemaName']} in {time.time() - started:.0f}s: "
+                f"{len(summary['tools'])} tool(s), {len(summary['powerapps_flows'])} flow(s) for the app"
+                + (f", {len(warnings)} UI warning(s)" if warnings else ""))
+            for w in warnings:
+                say(f"  ! {w}")
+            pa_token, why_not = (None, None)
+            if summary.get("codeapp"):
+                pa_token, why_not = powerapps_token(request, client_id, tenant, opener)
+                if why_not:
+                    say(f"the code app waits: {why_not}")
+            save("deploying", force=True)
+            result = rapplications.deploy(work / "out", environment, token, pa_token, log=say)
+            if summary.get("codeapp") and not result.get("codeapp"):
+                result["codeapp"] = {"skipped": "consent" if (why_not or "").startswith("consent") else "no-token",
+                                     "why": why_not}
+            result["summary"] = {k: summary.get(k) for k in ("rappid", "rapp", "tools", "chat")}
+            save("succeeded", force=True, result=result, finished=utc(), seconds=round(time.time() - started),
+                 tokenRefreshes=token.refreshed)
+            return status
         if request.get("workspaceZip"):
             _extract(request["workspaceZip"], work / "out")
             workspace = work / "out" / "workspace"

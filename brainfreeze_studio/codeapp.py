@@ -419,7 +419,8 @@ def package(rapp, out_dir, *, schema_name, environment_id=None, display_name=Non
         for f in sorted(dist.rglob("*"), reverse=True):
             f.unlink() if f.is_file() else f.rmdir()
     (dist / "rapp").mkdir(parents=True, exist_ok=True)
-    display_name = display_name or rapp.name
+    # Power Apps refuses these characters in an app's name
+    display_name = re.sub(r'[.\\/:*?"<>|]+', "-", display_name or rapp.name).strip(" -") or rapp.id
     files, report = transform_ui(rapp.ui, fetch_vendor)
     for rel, data in files.items():
         target = dist / "rapp" / rel

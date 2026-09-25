@@ -50,15 +50,25 @@ def _aad_error(e):
     return text.split(" Trace ID:")[0].strip()[:300]
 
 
+# Publishing a code app: PowerApps Service's delegated `User` permission, which a user can consent to themselves.
+POWERAPPS_SCOPE = "https://service.powerapps.com//User offline_access"
+POWERAPPS_AUDIENCES = ("https://service.powerapps.com", "475226c6-020e-4fb2-8a90-7a972cbfc1d4")
+
+
+class ConsentRequired(PermissionError):
+    """The user hasn't let this app act for them on that service yet: a sign-in that asks for it fixes that."""
+
+
 class UserToken:
-    """The user's delegated Dataverse token for one environment, got or refreshed with their sign-in's refresh token
-    through the public client when it nears expiry. With no access token, the first call gets one (how a sign-in
-    reaches the environment the user picks). Called before every Dataverse request."""
+    """The user's delegated token for one environment's Dataverse (or, with `scope`, another service), got or
+    refreshed with their sign-in's refresh token through the public client when it nears expiry. With no access
+    token, the first call gets one (how a sign-in reaches the environment the user picks). Called before every
+    request."""
 
     def __init__(self, access_token, environment, refresh_token=None, client_id=None, tenant="organizations",
-                 opener=None, now=time.time):
+                 opener=None, now=time.time, scope=None):
         self.access_token, self.refresh_token = access_token, refresh_token
-        self.environment, self.client_id, self.tenant = environment, client_id, tenant
+        self.environment, self.client_id, self.tenant, self.scope = environment, client_id, tenant, scope
         self.urlopen = opener or urllib.request.urlopen
         self.now = now
         self.refreshed = 0
@@ -76,14 +86,17 @@ class UserToken:
                                   "picks up where it stopped)")
         data = urllib.parse.urlencode({"grant_type": "refresh_token", "client_id": self.client_id,
                                        "refresh_token": self.refresh_token,
-                                       "scope": f"{self.environment}user_impersonation offline_access"}).encode()
+                                       "scope": self.scope or f"{self.environment}user_impersonation offline_access"}).encode()
         req = urllib.request.Request(f"https://login.microsoftonline.com/{self.tenant}/oauth2/v2.0/token", data=data,
                                      method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
         try:
             with self.urlopen(req, timeout=30) as r:
                 body = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
-            raise PermissionError(f"could not refresh your sign-in; sign in again ({_aad_error(e)})")
+            why = _aad_error(e)
+            if "AADSTS65001" in why or "consent" in why.lower():
+                raise ConsentRequired(f"you haven't allowed this app to do that for you yet ({why})")
+            raise PermissionError(f"could not refresh your sign-in; sign in again ({why})")
         self.access_token = body["access_token"]
         self.refresh_token = body.get("refresh_token") or self.refresh_token
         self.refreshed += 1

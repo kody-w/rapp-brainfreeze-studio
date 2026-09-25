@@ -311,6 +311,68 @@ class JobTests(unittest.TestCase):
         self.assertEqual(t(), fresh)
         self.assertEqual(t.refreshed, 1)
 
+    def rapp_module(self, codeapp=True):
+        calls = self.calls
+
+        class Rapps:
+            STORE = "https://raw.githubusercontent.com/kody-w/RAPP_Store/main/"
+
+            @staticmethod
+            def prepare(ref, out, **kw):
+                calls.append(("prepare", ref, kw))
+                return {"rappid": "rappid:@x/y:" + "0" * 64, "rapp": {"id": "y"}, "chat": None,
+                        "agent": {"schemaName": "rapp_Y"}, "tools": [{"name": "Y", "flow": None}],
+                        "powerapps_flows": [{"id": "f1"}],
+                        "codeapp": {"report": {"risks": ["calls eval()"]}} if codeapp else None}
+
+            @staticmethod
+            def deploy(out, environment, get_dv, get_pa, log):
+                calls.append(("deploy", environment, get_dv(), get_pa() if get_pa else None))
+                log("flows for the code app")
+                return {"agent": {"makerUrl": "https://copilotstudio.microsoft.com/x"}, "powerapps_flows": [],
+                        "codeapp": {"appId": "app-1", "playUrl": "https://apps.powerapps.com/play/x"} if get_pa else None}
+        return Rapps
+
+    def test_a_rapplication_job_deploys_its_agent_flows_and_app(self):
+        pa = token(aud="https://service.powerapps.com/")
+        job = self.queue({"rapplication": "@x/y", "powerapps_token": pa})
+        status = self.execute(job, rapplications=self.rapp_module(), host_js="host.js")
+        self.assertEqual(status["state"], "succeeded", status.get("error"))
+        prepare, deploy = self.calls
+        self.assertEqual((prepare[0], prepare[1], prepare[2]["host_js"], prepare[2]["store"], prepare[2]["name"]),
+                         ("prepare", "@x/y", "host.js", "https://raw.githubusercontent.com/kody-w/RAPP_Store/main/", None))
+        self.assertEqual(deploy[:2], ("deploy", ENV))
+        self.assertEqual(deploy[3], pa)
+        self.assertEqual(status["result"]["codeapp"]["playUrl"], "https://apps.powerapps.com/play/x")
+        self.assertIn("  ! calls eval()", status["log"])
+        self.assertIsNone(self.store.get(f"{job}/request.json"))           # both tokens leave with the request
+
+    def test_without_consent_the_agent_deploys_and_the_app_waits(self):
+        def refuse(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(json.dumps(
+                {"error": "invalid_grant", "error_description": "AADSTS65001: The user or administrator has not "
+                 "consented to use the application. Trace ID: 1"}).encode()))
+        job = self.queue({"rapplication": "@x/y"}, refresh="rt-1")
+        status = self.execute(job, rapplications=self.rapp_module(), client_id="app", opener=refuse)
+        self.assertEqual(status["state"], "succeeded", status.get("error"))
+        self.assertEqual(self.calls[1][3], None)                             # no Power Apps token to deploy with
+        self.assertEqual(status["result"]["codeapp"]["skipped"], "consent")
+        self.assertIn("AADSTS65001", status["result"]["codeapp"]["why"])
+        self.assertIn("the code app waits", " ".join(status["log"]))
+        job = self.queue({"rapplication": "@x/y"})
+        status = self.execute(job, rapplications=self.rapp_module())
+        self.assertEqual(status["result"]["codeapp"]["skipped"], "no-token")
+
+    def test_a_powerapps_token_is_got_with_the_refresh_token_and_its_own_scope(self):
+        seen = []
+
+        def opener(req, timeout=None):
+            seen.append(req.data.decode())
+            return Resp(json.dumps({"access_token": token(aud="https://service.powerapps.com/")}).encode())
+        t = jobs.UserToken(None, None, "rt-1", client_id="app", opener=opener, scope=auth.POWERAPPS_SCOPE)
+        self.assertEqual(auth.claims(t())["aud"], "https://service.powerapps.com/")
+        self.assertIn("scope=https%3A%2F%2Fservice.powerapps.com%2F%2FUser+offline_access", seen[0])
+
     def test_the_blob_store_speaks_rest_with_a_bearer_token(self):
         seen = []
 
@@ -468,6 +530,48 @@ class FunctionRouteTests(unittest.TestCase):
             status, body = self.call(pick, "POST", "signin/environment", {"environment": ENV, "refreshToken": "old"})
         self.assertEqual(status, 401)
         self.assertIn("sign in again", body["error"])
+
+    def test_a_rapplication_job_is_queued_with_a_checked_powerapps_token(self):
+        pa = token(aud="https://service.powerapps.com/")
+        status, body, queued = self.post(self.create, "jobs", {"environment": ENV, "rapplication": "@kody-w/agent_team",
+                                                               "refreshToken": "rt-1", "powerAppsToken": pa}, token())
+        self.assertEqual(status, 202, body)
+        request = self.store.get(f"{body['job']}/request.json")
+        self.assertEqual((request["rapplication"], request["name"], request["powerapps_token"], request["refresh_token"]),
+                         ("@kody-w/agent_team", "@kody-w/agent_team", pa, "rt-1"))
+        self.assertNotIn("displayName", request)                 # the job names it after the rapplication itself
+        for bad, code, why in (({"rapplication": "../../etc"}, 400, "RAPP Store reference"),
+                               ({"rapplication": "agent_team", "store": "http://x"}, 400, "https"),
+                               ({"rapplication": "agent_team", "powerAppsToken": token(aud=ENV)}, 401, "service.powerapps"),
+                               ({"rapplication": "agent_team",
+                                 "powerAppsToken": token(oid="user-2", aud="https://service.powerapps.com/")}, 401, "yours"),
+                               ({"rapplication": "agent_team",
+                                 "powerAppsToken": token(exp_in=60, aud="https://service.powerapps.com/")}, 401, "expired")):
+            status, body, queued = self.post(self.create, "jobs", {"environment": ENV, **bad}, token())
+            self.assertEqual((status, queued), (code, []), bad)
+            self.assertIn(why, body["error"])
+
+    def test_the_powerapps_sign_in_asks_for_the_power_apps_permission(self):
+        signin = self.fa.signin.build().get_user_function()
+        asked = []
+        fake = lambda url, fields: asked.append(fields) or {k: "x" for k in (
+            "device_code", "user_code", "verification_uri", "expires_in", "interval", "message")}
+        with mock.patch.object(self.fa, "CLIENT_ID", "app"), mock.patch.object(self.fa, "_post_form", fake):
+            self.assertEqual(self.call(signin, "POST", "signin", {"purpose": "powerapps"})[0], 200)
+        self.assertEqual(asked[0]["scope"], "https://service.powerapps.com//User offline_access openid profile")
+
+    def test_the_catalog_lists_what_can_be_deployed(self):
+        listing = self.fa.rapplications.build().get_user_function()
+        index = {"rapplications": [
+            {"id": "a", "name": "A", "publisher": "@p", "singleton_url": "https://x/a.py", "ui_url": "https://x/a.html"},
+            {"id": "gated", "publisher": "@p", "singleton_url": "https://x/g.py", "access": "private"},
+            {"id": "whole", "publisher": "@p"}]}
+        self.fa._catalog.update(at=0.0, entries=None)
+        with mock.patch.object(self.fa.urllib.request, "urlopen", lambda url, timeout=None: Resp(json.dumps(index).encode())):
+            status, body = self.call(listing, "GET", "rapplications")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["rapplications"], [{"ref": "@p/a", "name": "A", "summary": None, "category": None,
+                                                  "version": None, "hasUi": True}])
 
     def test_oversized_uploads_are_refused(self):
         with mock.patch.object(self.fa, "MAX_ZIP", 8):

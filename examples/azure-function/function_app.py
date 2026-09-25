@@ -18,14 +18,24 @@ and no az.
     POST /api/signin/environment  {environment, refreshToken} -> a token for that environment + the user's rights
     POST /api/deploy              Bearer <user token>, {environment, name, egg | eggUrl, ...} -> summary + log
     POST /api/jobs                the same, run in the background (any size): -> 202 {job}
+                                  or {environment, rapplication: "@publisher/id", refreshToken}: a RAPP
+                                  Store rapplication, as a Copilot Studio agent plus a Power Apps code app
     GET  /api/jobs/{job}          Bearer <user token> -> the job's state, log and result (its owner only)
+    GET  /api/rapplications       the RAPP Store catalog: what /api/jobs can deploy
 
 Small agents fit in one HTTP request (230 seconds). Anything bigger, such as a library of tens of flows, goes
 through /api/jobs: a queue trigger runs it for up to an hour (see jobs.py).
+
+A rapplication's code app is published with the user's own token for the Power Apps service, which the job gets with
+their refresh token. That needs the user's consent to PowerApps Service's `User` permission for this app
+registration; until they give it, the job deploys the agent and its flows and says the app is waiting, and
+POST /api/signin {purpose: "powerapps"} starts the sign-in that asks for it.
 """
 import base64
 import json
 import os
+import re
+import time
 import shutil
 import tempfile
 import traceback
@@ -43,6 +53,9 @@ from brainfreeze_studio.deploy import DeployError, deploy
 
 HERE = Path(__file__).resolve().parent
 SDK_DIR = HERE / "sdk"            # copilot-harness-sdk's tutorial/ folder, copied in by publish.sh
+HOST_JS = HERE / "codeapp-host.js"  # the code app host, built by publish.sh (npm brings Microsoft's SDK in)
+RAPP_REF = re.compile(r"^(?:@[A-Za-z0-9][A-Za-z0-9-]*/)?[a-z][a-z0-9_-]*$")
+CATALOG_TTL = 600
 CLIENT_ID = os.environ.get("BFS_CLIENT_ID", "")
 TENANT = os.environ.get("BFS_TENANT", "organizations")
 ALLOWED_TENANTS = [t for t in os.environ.get("BFS_ALLOWED_TENANTS", "").replace(";", ",").split(",") if t.strip()]
@@ -57,6 +70,7 @@ MAX_ZIP = 32 * 1024 * 1024
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 verify = auth.Verifier(ALLOWED_TENANTS)
 _store = None
+_catalog = {"at": 0.0, "entries": None}
 
 
 def store():
@@ -132,12 +146,16 @@ def signin(req: func.HttpRequest) -> func.HttpResponse:
     if not CLIENT_ID:
         return _json({"error": "BFS_CLIENT_ID is not set"}, 500)
     try:
-        wanted = _body(req).get("environment")
+        body = _body(req)
+        wanted = body.get("environment")
         resource = _environment(wanted) if wanted else auth.DISCOVERY
     except ValueError as e:
         return _json({"error": str(e)}, 400)
+    # a second sign-in, once, lets this app publish Power Apps (code apps) for the user
+    scope = (f"{auth.POWERAPPS_SCOPE} openid profile" if body.get("purpose") == "powerapps"
+             else f"{resource}user_impersonation offline_access openid profile")
     r = _post_form(f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/devicecode",
-                   {"client_id": CLIENT_ID, "scope": f"{resource}user_impersonation offline_access openid profile"})
+                   {"client_id": CLIENT_ID, "scope": scope})
     if "device_code" not in r:
         return _json({"error": r.get("error_description") or r.get("error") or "could not start sign-in"}, 502)
     return _json({k: r[k] for k in ("device_code", "user_code", "verification_uri", "expires_in", "interval", "message")})
@@ -258,6 +276,9 @@ def create_job(req: func.HttpRequest, queue: func.Out[str]) -> func.HttpResponse
         environment = _environment(body.get("environment"))
         token, account, owner = _user_token(req, environment)
         name = (body.get("name") or "").strip()
+        ref = (body.get("rapplication") or "").strip()
+        if ref:
+            return _queue_rapplication(body, ref, name, environment, token, account, owner, queue)
         if not name:
             raise ValueError("name is required")
         request = {"environment": environment, "name": name}
@@ -284,6 +305,58 @@ def create_job(req: func.HttpRequest, queue: func.Out[str]) -> func.HttpResponse
         return _json({"error": str(e)}, 400)
 
 
+def _queue_rapplication(body, ref, name, environment, token, account, owner, queue):
+    """A RAPP Store rapplication: its agent, the flows its app calls and its code app, deployed by a job."""
+    if not RAPP_REF.match(ref):
+        raise ValueError("rapplication must be a RAPP Store reference: @publisher/id or id")
+    request = {"environment": environment, "name": name or ref, "rapplication": ref}
+    if name:
+        request["displayName"] = name
+    store_url = body.get("store")
+    if store_url:
+        if not str(store_url).startswith("https://"):
+            raise ValueError("store must be an https catalog root")
+        request["store"] = store_url
+    for key in ("schemaName", "publisherPrefix", "translations"):
+        if body.get(key):
+            request[key] = body[key]
+    if request.get("translations") and not TRANSLATIONS:
+        raise ValueError(TRANSLATIONS_OFF)
+    if body.get("powerAppsToken"):
+        # a token for publishing the app, from the same person as the Dataverse token
+        claims = auth.claims(body["powerAppsToken"]) or {}
+        mine = auth.claims(token) or {}
+        if str(claims.get("aud", "")).rstrip("/") not in auth.POWERAPPS_AUDIENCES:
+            raise PermissionError("powerAppsToken must be a token for https://service.powerapps.com/")
+        if not claims.get("oid") or claims.get("oid") != mine.get("oid") or claims.get("tid") != mine.get("tid"):
+            raise PermissionError("powerAppsToken must be yours: the same account as the Dataverse token")
+        if (claims.get("exp") or 0) < time.time() + 300:
+            raise PermissionError("powerAppsToken has expired; sign in again")
+        request["powerapps_token"] = body["powerAppsToken"]
+    job_id = jobs.new_job(store(), request, token, owner, account, refresh_token=body.get("refreshToken"))
+    queue.set(json.dumps({"job": job_id}))
+    return _json({"job": job_id, "state": "queued", "status": f"/api/jobs/{job_id}", "account": account}, 202)
+
+
+@app.route(route="rapplications", methods=["GET"])
+def rapplications(req: func.HttpRequest) -> func.HttpResponse:
+    """The RAPP Store's rapplications a job can deploy (the catalog is public; cached for ten minutes)."""
+    if _catalog["entries"] is None or time.time() - _catalog["at"] > CATALOG_TTL:
+        from brainfreeze_studio import rapplication as rp
+        try:
+            with urllib.request.urlopen(rp.STORE.rstrip("/") + "/index.json", timeout=30) as r:
+                index = json.loads(r.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            return _json({"error": f"could not read the RAPP Store catalog: {e}"}, 502)
+        _catalog["entries"] = [
+            {"ref": f"{e.get('publisher')}/{e['id']}", "name": e.get("name"), "summary": e.get("summary"),
+             "category": e.get("category"), "version": e.get("version"), "hasUi": bool(e.get("ui_url"))}
+            for e in index.get("rapplications", [])
+            if e.get("id") and e.get("singleton_url") and e.get("access") != "private"]
+        _catalog["at"] = time.time()
+    return _json({"rapplications": _catalog["entries"]})
+
+
 @app.route(route="jobs/{job_id}", methods=["GET"])
 def job_status(req: func.HttpRequest) -> func.HttpResponse:
     token = auth.bearer(req)
@@ -301,7 +374,7 @@ def job_status(req: func.HttpRequest) -> func.HttpResponse:
 def run_deploy_job(msg: func.QueueMessage) -> None:
     job_id = json.loads(msg.get_body().decode("utf-8"))["job"]
     jobs.run_job(job_id, store(), bs.build, deploy, sdk_dir=SDK_DIR, client_id=CLIENT_ID, tenant=TENANT,
-                 allow_translations=TRANSLATIONS)
+                 allow_translations=TRANSLATIONS, host_js=HOST_JS if HOST_JS.is_file() else None)
 
 
 @app.route(route="page", methods=["GET"])
