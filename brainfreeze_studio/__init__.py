@@ -283,7 +283,7 @@ def _compose_instructions(soul, sdk_dir, routing, agent_names, generic, display_
 
 # ── connector code: an agent's logic ported to C#, proven, run by a flow that keeps its state ─────────────────
 
-def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars):
+def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars, files_home=None):
     """Prove a connector-code port (connector_code.prove) and, when it holds, lay the connector, its flow and the tool.
     Returns whether the agent became live; a refused port leaves a note and the agent falls back."""
     import tempfile
@@ -330,8 +330,14 @@ def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_
     wf = workflow_id_for(schema_name, spec["flow_name"])
     wf_dir = ws / "workflows" / f"{spec['flow_name']}-{wf}"
     wf_dir.mkdir(parents=True, exist_ok=True)
-    (wf_dir / "workflow.json").write_text(json.dumps(cc.compile_flow(spec, schema_name, name, display, logical),
-                                                     indent=2) + "\n")
+    (wf_dir / "workflow.json").write_text(json.dumps(cc.compile_flow(spec, schema_name, name, display, logical,
+                                                                     files_home=files_home), indent=2) + "\n")
+    if spec.get("file_inputs"):
+        # where its files live: environment variables the deploy fills in (the site defaults to the tenant's root)
+        for key, v in cc.files_parameters(schema_name, **(files_home or {})).items():
+            if not any(e["schemaName"] == v["schemaName"] for e in env_vars):
+                env_vars.append({"schemaName": v["schemaName"], "displayName": v["displayName"], "type": "String",
+                                 "defaultValue": v["defaultValue"], "files": key})
     (wf_dir / "metadata.yml").write_text(
         f"jsonFileName: workflows/{spec['flow_name']}-{wf}/workflow.json\nworkflowId: {wf}\n"
         f"name: {name} {spec['flow_name']}\ntype: 1\ndescription: {_yaml_scalar(spec['description'][:200])}\n"
@@ -388,8 +394,9 @@ def _proof(schema_name, session_manifest):
 
 def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, environment=None,
           session=None, model="Sonnet46", hn_api_name=None, language=1033, mcp_connector_id=None,
-          mcp_host=None, translations=None):
-    """Egg in, harness workspace out. Returns a summary dict; writes <out_dir>/workspace and sidecars."""
+          mcp_host=None, translations=None, files_home=None):
+    """Egg in, harness workspace out. Returns a summary dict; writes <out_dir>/workspace and sidecars. files_home
+    ({"site", "folder"}) is where agents that read files find them (a SharePoint site and folder)."""
     if not name or len(name) > MAX_DISPLAY_NAME:
         raise StudioBuildError(f"name must be 1-{MAX_DISPLAY_NAME} characters (longer names never finish provisioning)")
     if not re.fullmatch(r"[a-z][a-z0-9]{1,7}", publisher_prefix or ""):
@@ -483,7 +490,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
             if a["profile"] or not spec:
                 continue
             if spec.get("mode") == "connector-code":
-                if _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars):
+                if _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars, files_home):
                     live.append(a["contract"]["name"])
                     routing.append(f"code:{spec['flow_name']}")
                 continue

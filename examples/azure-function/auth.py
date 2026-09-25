@@ -53,6 +53,9 @@ def _aad_error(e):
 # Publishing a code app: PowerApps Service's delegated `User` permission, which a user can consent to themselves.
 POWERAPPS_SCOPE = "https://service.powerapps.com//User offline_access"
 POWERAPPS_AUDIENCES = ("https://service.powerapps.com", "475226c6-020e-4fb2-8a90-7a972cbfc1d4")
+# Making the user's own SharePoint connection when they have none (API Hub's first-party login exchanges this token
+# on their behalf). Optional: without it a deploy uses a SharePoint connection the user already has.
+APIHUB_SCOPE = "https://apihub.azure.com/.default offline_access"
 
 
 class ConsentRequired(PermissionError):

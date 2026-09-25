@@ -28,6 +28,9 @@ def main(argv=None):
     b.add_argument("--translations", help="folder of translation specs: agents that prove parity become agent flows")
     b.add_argument("--mcp-connector-id", help="fallback: route untranslated agents to an MCP server's custom connector")
     b.add_argument("--mcp-host", help="with --mcp-connector-id: the MCP server's host, for the connector files")
+    b.add_argument("--files-site", help="the SharePoint site agents that read files find them in "
+                   "(https://<tenant>.sharepoint.com/sites/<site>; default: filled in at deploy)")
+    b.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
     b.add_argument("--out", default="build", help="output folder (default build/)")
     b.add_argument("--json", action="store_true", help="print the summary as JSON")
     sv = sub.add_parser("serve", help="fallback: serve an egg's agents as MCP tools (runs the real agent.py)")
@@ -52,6 +55,9 @@ def main(argv=None):
     ra.add_argument("--deploy", action="store_true", help="deploy as you: the agent, its flows and the code app, "
                                                           "with your Azure CLI sign-in (az login)")
     ra.add_argument("--no-app", action="store_true", help="with --deploy: leave the code app out")
+    ra.add_argument("--files-site", help="the SharePoint site agents that read files find them in (default: the "
+                    "environment's RAPP Files Site, else your tenant's root site)")
+    ra.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
     ra.add_argument("--json", action="store_true", help="print the summary as JSON")
     ch = sub.add_parser("codeapp-host", help="build the code app host once (needs node and npm)")
     ch.add_argument("--build-dir", help="default: ~/.cache/brainfreeze-studio/codeapp-host-build")
@@ -81,7 +87,8 @@ def main(argv=None):
     try:
         r = build(a.egg, a.out, a.name, a.publisher_prefix, schema_name=a.schema_name, sdk_dir=a.sdk_dir,
                   environment=a.environment, session=a.session, model=a.model, hn_api_name=a.hn_api_name,
-                  translations=a.translations, mcp_connector_id=a.mcp_connector_id, mcp_host=a.mcp_host)
+                  translations=a.translations, mcp_connector_id=a.mcp_connector_id, mcp_host=a.mcp_host,
+                  files_home=_files_home(a))
     except StudioBuildError as e:
         print(f"brainfreeze-studio: {e}", file=sys.stderr)
         return 1
@@ -119,6 +126,12 @@ def az_token(resource):
 
 
 _TOKENS = {}
+APIHUB = "https://apihub.azure.com"
+
+
+def _files_home(a):
+    home = {k: v for k, v in (("site", a.files_site), ("folder", a.files_folder)) if v}
+    return home or None
 
 
 def _rapplication(a):
@@ -131,7 +144,7 @@ def _rapplication(a):
     try:
         s = rp.prepare(a.ref, a.out, name=a.name, publisher_prefix=a.publisher_prefix, schema_name=a.schema_name,
                        store=a.store or rp.STORE, translations=a.translations, sdk_dir=a.sdk_dir, rappid=a.rappid,
-                       environment=a.environment)
+                       environment=a.environment, files_home=_files_home(a))
     except (StudioBuildError, rp.RapplicationError, FileNotFoundError) as e:
         print(f"brainfreeze-studio: {e}", file=sys.stderr)
         return 1
@@ -139,8 +152,9 @@ def _rapplication(a):
     if a.deploy:
         env = a.environment.rstrip("/") + "/"
         try:
-            deployed = rp.deploy(a.out, env, lambda: az_token(env.rstrip("/")),
-                                 None if a.no_app else (lambda: az_token(AUDIENCE)), log=print)
+            deployed = rp.deploy(a.out, env, lambda: az_token(env.rstrip("/")), lambda: az_token(AUDIENCE),
+                                 log=print, app=not a.no_app, get_apihub_token=lambda: az_token(APIHUB),
+                                 files_site=a.files_site, files_folder=a.files_folder)
         except (DeployError, PublishError) as e:
             print(f"brainfreeze-studio: {e}", file=sys.stderr)
             return 1

@@ -50,10 +50,12 @@ class CodeAppBrowserTests(unittest.TestCase):
         cls.pw.stop()
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def open(self, where, copilot=None, **kw):
+    def open(self, where, copilot=None, connector_code=None, library=None, **kw):
         out = self.tmp / re.sub(r"[^a-z0-9]+", "-", str(where).lower()).strip("-")[-40:]
         summary = rapplication.prepare(where, out, host_js=self.host, **kw)
-        player = self.h.Player(out / "codeapp" / "dist", twin_definitions(out), copilot=copilot)
+        player = self.h.Player(out / "codeapp" / "dist", twin_definitions(out), copilot=copilot,
+                               connector_code=connector_code)
+        player.library = dict(library or {})
         base = player.start()
         self.addCleanup(player.stop)
         browser, page, log = self.h.open_player(self.pw, base)
@@ -98,6 +100,54 @@ class CodeAppBrowserTests(unittest.TestCase):
         self.assertEqual(call["parameters"]["input"], {"message": 'Use the JsonDoctor tool with action="inspect" '
                                                                   'path="data.jsonl". Reply with the tool\'s output only.',
                                                        "conversation_id": ""})
+        self.assertClean(log)
+
+    @unittest.skipUnless(HAVE_STORE and shutil.which("dotnet"), "needs dotnet and BFS_RAPP_STORE")
+    def test_json_doctor_reads_library_files_through_its_flow_and_shows_the_pythons_answer(self):
+        """Proof A for a files agent: the UI's call runs the Power Apps twin, whose own expressions read the named
+        files from the (stand-in) SharePoint folder and run the real compiled connector code; the UI shows exactly
+        what the Python answers on the same files."""
+        from brainfreeze_studio import connector_code as cc, materialize
+        spec = json.loads((TRANSLATIONS / "json_doctor.json").read_text())
+        script = TRANSLATIONS / "json_doctor.csx"
+        dll = cc.compile_script(cc.linked(script.read_text()))
+        library = {k: cc.fixture_bytes(v) for k, v in spec["fixtures"].items()}
+        summary, player, page, ui, log = self.open(
+            "@rapp/json_doctor", store=STORE, translations=str(TRANSLATIONS),
+            connector_code={cc.connector_name("rapp_JSONDoctor", spec)[0]: dll}, library=library)
+        answers = []
+        run_code = player._run_code
+        player._run_code = lambda flow, code, given: answers.append(run_code(flow, code, given)["result"]) or \
+            {"result": answers[-1]}
+        steps = [("inspect", "data/users.json", ""), ("validate", "data/broken.json", ""),
+                 ("diff", "data/users.json", "data/users_v2.json"), ("query", "data/nested.json", "org.teams.0.members.1"),
+                 ("inspect", "data/missing.json", "")]
+        shown = []
+        for action, path, extra in steps:
+            ui.locator("#out").evaluate("e => e.innerHTML = ''")
+            ui.locator("#action").select_option(action)
+            ui.locator("#path").fill(path)
+            ui.locator("#extra").fill(extra)
+            ui.locator("#go").click()
+            ui.locator("#out .card").wait_for(timeout=30000)
+            shown.append(ui.locator("#out").inner_text())
+        calls = [{"args": {k: v for k, v in (("action", a), ("path", p), ("other" if a == "diff" else "key", x)) if v}}
+                 for a, p, x in steps]
+        proof = cc.prove({**spec, "sequences": [calls]}, Path(STORE, "apps", "@rapp", "json_doctor", "singleton",
+                                                              "json_doctor_agent.py"),
+                         ROOT / "brainfreeze_studio" / "basic_agent.py", script,
+                         python=materialize.agent_python("3.11"), records=True)
+        self.assertTrue(proof["parity"])
+        self.assertEqual(answers, [r["python"]["output"] for r in proof["records"]])     # the flow's answer is the Python's
+        runs = [c for c in player.calls if c["operation"] == "Run"]
+        self.assertEqual({c["table"] for c in runs}, {codeapp.data_source_name(summary["powerapps_flows"][0]["name"])})
+        self.assertIn("40 record(s) · array · 6460 bytes", shown[0])
+        self.assertIn("INVALID", shown[1])
+        self.assertIn("line 3, column 21", shown[1])
+        for i in (2, 3):                        # diff and query show the answer itself, as JSON.stringify(…, null, 2)
+            want = page.evaluate("s => JSON.stringify(JSON.parse(s), null, 2)", answers[i])
+            self.assertEqual(shown[i].strip(), want)
+        self.assertIn("file not found: data/missing.json", shown[4])
         self.assertClean(log)
 
     @unittest.skipUnless(HAVE_STORE, "set BFS_RAPP_STORE to a RAPP_Store checkout")

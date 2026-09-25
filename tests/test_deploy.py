@@ -222,5 +222,211 @@ class DeployTests(unittest.TestCase):
             self.run_deploy(schema_name="nounderscore")
 
 
+def jwt(claims):
+    import base64
+    part = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")  # noqa: E731
+    return f"{part({'alg': 'none'})}.{part(claims)}.x"
+
+
+ME, SOMEONE = "11111111-0000-0000-0000-000000000001", "22222222-0000-0000-0000-000000000002"
+POWERAPPS_TOKEN, HUB_TOKEN = jwt({"oid": ME, "aud": "https://service.powerapps.com/"}), jwt({"oid": ME})
+SITES = [{"Name": "https://contoso.sharepoint.com/sites/team", "DisplayName": "Team"},
+         {"Name": "https://contoso.sharepoint.com", "DisplayName": "Communication site"}]
+SIGN_IN_ALONE = {"token": {"type": "oauthSetting", "oAuthSettings": {"properties": {
+                     "IsFirstParty": "True", "IsOnbehalfofLoginSupported": True}}},
+                 "token:TenantId": {"type": "string", "uiDefinition": {"constraints": {"required": "false",
+                                                                                         "hidden": "true"}}},
+                 "gateway": {"type": "gatewaySetting", "uiDefinition": {"constraints": {"capability": ["gateway"]}}}}
+
+
+class _Reply:
+    def __init__(self, body):
+        self.body = json.dumps(body).encode()
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakePowerApps:
+    """The Power Apps resource provider's connections, API Hub's first-party login and the SharePoint connector's
+    runtime, as an opener. Connections: {(api, name): connection}."""
+
+    def __init__(self, connections=(), parameters=SIGN_IN_ALONE, login_works=True):
+        self.connections = {(c["api"], c["name"]): c for c in connections}
+        self.parameters, self.login_works = parameters, login_works
+        self.requests = []
+
+    def __call__(self, req, timeout=None):
+        import io
+        import urllib.error
+        import urllib.parse
+        url = urllib.parse.urlsplit(req.full_url)
+        method, body = req.get_method(), json.loads(req.data) if req.data else None
+        self.requests.append((method, req.full_url, body, req.headers.get("Authorization")))
+        if url.netloc == "consent.example":                       # the first-party login
+            key = tuple(urllib.parse.parse_qs(url.query)["c"][0].split("|"))
+            if not self.login_works or body != {"accessToken": HUB_TOKEN}:
+                raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"Message": "no"}'))
+            self.connections[key]["properties"]["statuses"] = [{"status": "Connected"}]
+            return _Reply({})
+        if url.netloc == "runtime.example":
+            return _Reply({"value": SITES})
+        m = re.match(r"/providers/Microsoft\.PowerApps/apis/([^/]+)(?:/connections(?:/([^/]+))?)?$", url.path)
+        api, listing, name = m.group(1), "/connections" in url.path, m.group(2)
+        if not listing:
+            return _Reply({"name": api, "properties": {"displayName": "SharePoint", "connectionParameters":
+                                                        self.parameters,
+                                                        "runtimeUrls": ["https://runtime.example/apis/x/connections/"]}})
+        if name is None:
+            return _Reply({"value": [c for (a, _), c in self.connections.items() if a == api]})
+        if method == "PUT":
+            self.connections[(api, name)] = {"api": api, "name": name, "properties": {
+                **body["properties"], "createdBy": {"id": ME}, "statuses": [{"status": "Error"}],
+                "consentInfo": {"firstPartyLoginUri": f"https://consent.example/login?c={api}|{name}"}
+                if "ConsentLink" in url.query else {}}}
+            return _Reply(self.connections[(api, name)])
+        if method == "DELETE":
+            self.connections.pop((api, name), None)
+            return _Reply({})
+        return _Reply(self.connections[(api, name)])
+
+
+def connection(api, name, owner=ME, status="Connected", modified="2026-09-01"):
+    return {"api": api, "name": name, "properties": {"createdBy": {"id": owner}, "statuses": [{"status": status}],
+                                                      "lastModifiedTime": modified}}
+
+
+class UserConnectionTests(unittest.TestCase):
+    def find(self, rp, hub=True):
+        return dp.user_connection(lambda: POWERAPPS_TOKEN, "env-1", "shared_sharepointonline",
+                                  (lambda: HUB_TOKEN) if hub else None, opener=rp, wait=0)
+
+    def test_the_users_own_connected_connection_is_used(self):
+        rp = FakePowerApps([connection("shared_sharepointonline", "theirs", owner=SOMEONE, modified="2026-09-09"),
+                            connection("shared_sharepointonline", "mine-broken", status="Error", modified="2026-09-08"),
+                            connection("shared_sharepointonline", "mine-old", modified="2026-01-01"),
+                            connection("shared_sharepointonline", "mine", modified="2026-09-02")])
+        self.assertEqual(self.find(rp), ("mine", "existing"))
+        self.assertFalse([r for r in rp.requests if r[0] != "GET"])
+
+    def test_with_none_one_is_made_with_the_users_sign_in_alone(self):
+        rp = FakePowerApps([connection("shared_sharepointonline", "theirs", owner=SOMEONE)])
+        name, how = self.find(rp)
+        self.assertEqual(how, "created")
+        put = next(r for r in rp.requests if r[0] == "PUT")
+        self.assertIn("$expand=ConsentLink", put[1])
+        self.assertEqual(put[2]["properties"]["connectionParameters"], {})
+        login = next(r for r in rp.requests if r[1].startswith("https://consent.example/"))
+        self.assertEqual((login[0], login[2], login[3]), ("POST", {"accessToken": HUB_TOKEN}, "Bearer " + HUB_TOKEN))
+        self.assertEqual(rp.connections[("shared_sharepointonline", name)]["properties"]["statuses"],
+                         [{"status": "Connected"}])
+
+    def test_a_failed_login_leaves_nothing_behind(self):
+        rp = FakePowerApps(login_works=False)
+        name, why = self.find(rp)
+        self.assertIsNone(name)
+        self.assertIn("HTTP 400", why)
+        self.assertEqual(rp.connections, {})
+
+    def test_a_connector_that_needs_an_interactive_sign_in_is_left_alone(self):
+        rp = FakePowerApps(parameters={"token": {"type": "oauthSetting", "oAuthSettings": {"properties": {}}}})
+        self.assertEqual(self.find(rp), (None, "its connections need an interactive sign-in"))
+        self.assertIsNone(self.find(FakePowerApps(), hub=False)[0])
+        self.assertFalse([r for r in rp.requests if r[0] == "PUT"])
+
+    def test_which_connectors_sign_in_alone(self):
+        self.assertEqual(dp.silent_sign_in({"properties": {"connectionParameters": SIGN_IN_ALONE}}), (True, None))
+        visible = dict(SIGN_IN_ALONE, siteUrl={"type": "string", "uiDefinition": {"constraints": {"required": "true"}}})
+        self.assertEqual(dp.silent_sign_in({"properties": {"connectionParameters": visible}}), (False, None))
+        sets = {"values": [{"name": "key", "parameters": {"api_key": {"type": "securestring"}}},
+                           {"name": "oauth", "parameters": SIGN_IN_ALONE}]}
+        self.assertEqual(dp.silent_sign_in({"properties": {"connectionParameterSets": sets}}), (True, "oauth"))
+        self.assertEqual(dp.root_site([{"url": s["Name"]} for s in SITES]), "https://contoso.sharepoint.com")
+
+
+def files_workspace(root):
+    """make_workspace plus a flow that reads files from SharePoint, as connector_code lays one out."""
+    ws = make_workspace(root)
+    wid = "4b1d7d3e-0000-5000-8000-00000000f11e"
+    folder = ws / "workflows" / f"JsonDoctorFlow-{wid}"
+    folder.mkdir()
+    params = {"$connections": {"defaultValue": {}, "type": "Object"},
+              "RAPP Files Site (rapp_RappFilesSite)": {"defaultValue": "", "type": "String",
+                                                       "metadata": {"schemaName": "rapp_RappFilesSite"}},
+              "RAPP Files Folder (rapp_RappFilesFolder)": {"defaultValue": "/Shared Documents", "type": "String",
+                                                           "metadata": {"schemaName": "rapp_RappFilesFolder"}}}
+    (folder / "workflow.json").write_text(json.dumps({"properties": {"connectionReferences": {
+        "shared_sharepointonline": {"api": {"name": "shared_sharepointonline"}, "connection": {
+            "connectionReferenceLogicalName": "rapp_TestDesk.shared_sharepointonline"}}},
+        "definition": {"parameters": params, "actions": {}}}}))
+    (folder / "metadata.yml").write_text(f"workflowId: {wid}\nname: Test Desk JsonDoctorFlow\n")
+    prov = json.loads((Path(root) / "provenance.json").read_text())
+    prov["environment_variables"] += [
+        {"schemaName": "rapp_RappFilesSite", "displayName": "RAPP Files Site", "type": "String", "defaultValue": "",
+         "files": "site"},
+        {"schemaName": "rapp_RappFilesFolder", "displayName": "RAPP Files Folder", "type": "String",
+         "defaultValue": "/Shared Documents", "files": "folder"}]
+    (Path(root) / "provenance.json").write_text(json.dumps(prov))
+    return ws, wid
+
+
+class FilesDeployTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="bfs-deploy-files-"))
+        self.ws, self.wid = files_workspace(self.root)
+        self.dv = FakeDataverse()
+        self.rp = FakePowerApps([connection("shared_commondataserviceforapps", "dv-mine")])
+
+    def run_deploy(self, **kw):
+        return dp.deploy(self.ws, ENV, lambda: "token", dataverse=self.dv, log=lambda *_: None,
+                         get_powerapps_token=lambda: POWERAPPS_TOKEN, get_apihub_token=lambda: HUB_TOKEN,
+                         powerapps_opener=self.rp, **kw)
+
+    def variables(self):
+        return {v["schemaname"]: v["defaultvalue"] for v in self.dv.t["environmentvariabledefinitions"].values()}
+
+    def site_in_flow(self):
+        stored = json.loads(self.dv.t["workflows"][self.wid]["clientdata"])
+        return stored["properties"]["definition"]["parameters"]["RAPP Files Site (rapp_RappFilesSite)"]["defaultValue"]
+
+    def test_the_files_live_in_the_tenants_root_site_through_a_connection_made_as_the_user(self):
+        r = self.run_deploy()
+        refs = {x["connectionreferencelogicalname"]: x["connectionid"] for x in self.dv.t["connectionreferences"].values()}
+        made = [n for (a, n) in self.rp.connections if a == "shared_sharepointonline"]
+        self.assertEqual(refs["rapp_TestDesk.shared_sharepointonline"], made[0])       # made with the sign-in alone
+        self.assertEqual(refs["rapp_TestDesk.cr.shared_commondataserviceforapps"], "dv-mine")   # their own
+        self.assertEqual(r["files_home"]["site"], "https://contoso.sharepoint.com")
+        self.assertEqual(self.variables()["rapp_RappFilesSite"], "https://contoso.sharepoint.com")
+        self.assertEqual(self.variables()["rapp_RappFilesFolder"], "/Shared Documents")
+        self.assertEqual(self.site_in_flow(), "https://contoso.sharepoint.com")
+
+    def test_a_site_given_wins_and_the_environments_own_value_is_kept_otherwise(self):
+        self.run_deploy(files_site="https://contoso.sharepoint.com/sites/team")
+        self.assertEqual(self.variables()["rapp_RappFilesSite"], "https://contoso.sharepoint.com/sites/team")
+        r = self.run_deploy()
+        self.assertEqual(r["files_home"]["site"], "https://contoso.sharepoint.com/sites/team")
+        self.assertEqual(self.site_in_flow(), "https://contoso.sharepoint.com/sites/team")
+
+    def test_no_site_and_no_way_to_find_one_is_a_clear_error(self):
+        with self.assertRaisesRegex(dp.DeployError, "no site was given or found"):
+            dp.deploy(self.ws, ENV, lambda: "token", dataverse=self.dv, log=lambda *_: None,
+                      connections={"rapp_TestDesk.shared_sharepointonline": "sp-1"})
+
+    def test_an_empty_default_is_filled_and_a_set_one_is_left_alone(self):
+        var = {"schemaName": "rapp_X", "displayName": "X", "defaultValue": ""}
+        self.assertEqual(dp.ensure_environment_variable(self.dv, var)["operation"], "created")
+        self.assertEqual(dp.ensure_environment_variable(self.dv, dict(var, defaultValue="a"))["operation"], "updated")
+        self.assertEqual(dp.ensure_environment_variable(self.dv, dict(var, defaultValue="b"))["operation"], "existing")
+        self.assertEqual(dp.ensure_environment_variable(self.dv, dict(var, defaultValue="b", replace=True))["operation"],
+                         "updated")
+        self.assertEqual(self.variables()["rapp_X"], "b")
+
+
 if __name__ == "__main__":
     unittest.main()

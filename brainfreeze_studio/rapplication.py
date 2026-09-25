@@ -298,7 +298,8 @@ def app_tools(r, agents, twin_flows):
 
 
 def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=None, store=STORE, translations=None,
-            sdk_dir=None, environment=None, rappid=None, created_utc=None, fetch_vendor=None, host_js=None):
+            sdk_dir=None, environment=None, rappid=None, created_utc=None, fetch_vendor=None, host_js=None,
+            files_home=None):
     """Everything offline, nothing deployed: the rapplication egg, the Copilot Studio workspace built from it, Power
     Apps twins of the flows the build proved, and the code app. Writes out_dir/rapplication.json and returns it.
     A rappid minted by an earlier run in the same out_dir is kept, so re-running updates the same organism."""
@@ -318,7 +319,7 @@ def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=N
     egg_path.write_bytes(egg)
     display = (name or r.name)[:42]
     built = build(str(egg_path), out, display, publisher_prefix, schema_name=schema_name, sdk_dir=sdk_dir,
-                  environment=environment, translations=translations)
+                  environment=environment, translations=translations, files_home=files_home)
     schema = built["schema_name"]
     twin_flows = twins(built["workspace"], schema, display)
     tools = app_tools(r, built["agents"], twin_flows)
@@ -360,16 +361,19 @@ def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=N
 
 
 def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, *, log=print, publish_agent=True,
-           dataverse=None, opener=None):
+           dataverse=None, opener=None, get_apihub_token=None, files_site=None, files_folder=None, app=True):
     """Deploy what prepare() wrote, as the signed-in user: the agent (brainfreeze_studio.deploy), the Power Apps
-    flows, then the code app (brainfreeze_studio.codeapp_publish) when there is one and a Power Apps token."""
+    flows, then the code app (brainfreeze_studio.codeapp_publish) when there is one, a Power Apps token and app is
+    true. get_apihub_token lets the deploy make the user's own SharePoint (or other Microsoft) connection when they
+    have none; files_site/files_folder say where agents that read files find them."""
     from . import deploy as dep
     from .codeapp_publish import publish
     out = Path(out_dir).expanduser()
     summary = json.loads((out / "rapplication.json").read_text())
     dv = dataverse or dep.Dataverse(environment, get_dataverse_token)
     agent = dep.deploy(out / "workspace", environment, get_dataverse_token, log=log, do_publish=publish_agent,
-                       dataverse=dv, get_powerapps_token=get_powerapps_token, powerapps_opener=opener)
+                       dataverse=dv, get_powerapps_token=get_powerapps_token, powerapps_opener=opener,
+                       get_apihub_token=get_apihub_token, files_site=files_site, files_folder=files_folder)
     from .connector_code import fill_connectors
     code_ids = {c["displayName"]: c["internalId"] for c in agent.get("connectors") or []}
     log("flows for the code app")
@@ -377,6 +381,8 @@ def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, 
     for f in sorted((out / "powerapps-flows").glob("*.json")):
         t = json.loads(f.read_text())
         t["definition"] = fill_connectors(t["definition"], code_ids)
+        if agent.get("files_home"):
+            dep.apply_files_home(t["definition"], agent["files_home"])
         for api, ref in ((t["definition"].get("properties") or {}).get("connectionReferences") or {}).items():
             logical = ((ref or {}).get("connection") or {}).get("connectionReferenceLogicalName")
             if logical:
@@ -386,7 +392,7 @@ def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, 
         flows.append(dep.ensure_workflow(dv, t))
         log(f"   {t['name']}: {flows[-1]['operation']}")
     result = {"agent": agent, "powerapps_flows": flows, "codeapp": None}
-    if summary.get("codeapp") and get_powerapps_token:
+    if summary.get("codeapp") and get_powerapps_token and app:
         env_id = dep.environment_id(dv)
         if not env_id:
             raise dep.DeployError("couldn't read the environment id from Dataverse")

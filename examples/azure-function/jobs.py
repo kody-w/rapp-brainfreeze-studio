@@ -28,7 +28,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from auth import POWERAPPS_SCOPE, ConsentRequired, UserToken
+from auth import APIHUB_SCOPE, POWERAPPS_SCOPE, ConsentRequired, UserToken
 
 CONTAINER = "bfs-deploy-jobs"
 QUEUE = "bfs-deploy-jobs"
@@ -163,6 +163,25 @@ def powerapps_token(request, client_id, tenant, opener=None):
     return token, None
 
 
+def apihub_token(request, client_id, tenant, opener=None):
+    """The user's API Hub token, got with their refresh token: with it a deploy makes their SharePoint connection
+    when they have none. None when this sign-in can't get one; the deploy then uses a connection they have."""
+    if not (request.get("refresh_token") and client_id):
+        return None
+    token = UserToken(None, None, request["refresh_token"], client_id, tenant, opener=opener, scope=APIHUB_SCOPE)
+    try:
+        token()
+    except PermissionError:                       # ConsentRequired included
+        return None
+    return token
+
+
+def reads_files(out):
+    """Whether a prepared rapplication has an agent that reads files (from SharePoint)."""
+    prov = Path(out) / "provenance.json"
+    return prov.is_file() and any(v.get("files") for v in json.loads(prov.read_text()).get("environment_variables") or [])
+
+
 def run_job(job_id, store, build, deploy, *, sdk_dir, client_id=None, tenant="organizations",
             allow_translations=False, flush_every=3.0, host_js=None, rapplications=None, opener=None):
     """Run one queued job end to end. Never raises: the outcome is written to the job's status. A request with a
@@ -226,8 +245,14 @@ def run_job(job_id, store, build, deploy, *, sdk_dir, client_id=None, tenant="or
                 pa_token, why_not = powerapps_token(request, client_id, tenant, opener)
                 if why_not:
                     say(f"the code app waits: {why_not}")
+            hub = None
+            if reads_files(work / "out"):
+                hub = apihub_token(request, client_id, tenant, opener)
+                say("its agent reads files from SharePoint" + ("" if hub else
+                    ": it uses a SharePoint connection you already have (this sign-in can't make one)"))
             save("deploying", force=True)
-            result = rapplications.deploy(work / "out", environment, token, pa_token, log=say)
+            result = rapplications.deploy(work / "out", environment, token, pa_token, log=say, get_apihub_token=hub,
+                                          files_site=request.get("files_site"), files_folder=request.get("files_folder"))
             if summary.get("codeapp") and not result.get("codeapp"):
                 result["codeapp"] = {"skipped": "consent" if (why_not or "").startswith("consent") else "no-token",
                                      "why": why_not}

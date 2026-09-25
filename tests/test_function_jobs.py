@@ -9,6 +9,7 @@ import sys
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -311,7 +312,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual(t(), fresh)
         self.assertEqual(t.refreshed, 1)
 
-    def rapp_module(self, codeapp=True):
+    def rapp_module(self, codeapp=True, files=False):
         calls = self.calls
 
         class Rapps:
@@ -320,14 +321,18 @@ class JobTests(unittest.TestCase):
             @staticmethod
             def prepare(ref, out, **kw):
                 calls.append(("prepare", ref, kw))
+                if files:                          # an agent that reads files, as the build records one
+                    Path(out).mkdir(parents=True, exist_ok=True)
+                    (Path(out) / "provenance.json").write_text(json.dumps({"environment_variables": [
+                        {"schemaName": "rapp_RappFilesSite", "defaultValue": "", "files": "site"}]}))
                 return {"rappid": "rappid:@x/y:" + "0" * 64, "rapp": {"id": "y"}, "chat": None,
                         "agent": {"schemaName": "rapp_Y"}, "tools": [{"name": "Y", "flow": None}],
                         "powerapps_flows": [{"id": "f1"}],
                         "codeapp": {"report": {"risks": ["calls eval()"]}} if codeapp else None}
 
             @staticmethod
-            def deploy(out, environment, get_dv, get_pa, log):
-                calls.append(("deploy", environment, get_dv(), get_pa() if get_pa else None))
+            def deploy(out, environment, get_dv, get_pa, log, **kw):
+                calls.append(("deploy", environment, get_dv(), get_pa() if get_pa else None, kw))
                 log("flows for the code app")
                 return {"agent": {"makerUrl": "https://copilotstudio.microsoft.com/x"}, "powerapps_flows": [],
                         "codeapp": {"appId": "app-1", "playUrl": "https://apps.powerapps.com/play/x"} if get_pa else None}
@@ -362,6 +367,37 @@ class JobTests(unittest.TestCase):
         job = self.queue({"rapplication": "@x/y"})
         status = self.execute(job, rapplications=self.rapp_module())
         self.assertEqual(status["result"]["codeapp"]["skipped"], "no-token")
+
+    def test_an_agent_that_reads_files_gets_an_api_hub_token_and_where_its_files_are(self):
+        seen = []
+
+        def opener(req, timeout=None):
+            seen.append(urllib.parse.parse_qs(req.data.decode())["scope"][0])
+            return Resp(json.dumps({"access_token": token(aud="x"), "refresh_token": "rt-2"}).encode())
+        job = self.queue({"rapplication": "@x/y", "files_site": "https://contoso.sharepoint.com/sites/team",
+                          "files_folder": "/Shared Documents/RAPP"}, refresh="rt-1")
+        status = self.execute(job, rapplications=self.rapp_module(files=True), client_id="app", opener=opener)
+        self.assertEqual(status["state"], "succeeded", status.get("error"))
+        kw = self.calls[1][4]
+        self.assertIsNotNone(kw["get_apihub_token"])
+        self.assertEqual((kw["files_site"], kw["files_folder"]),
+                         ("https://contoso.sharepoint.com/sites/team", "/Shared Documents/RAPP"))
+        self.assertIn(auth.APIHUB_SCOPE, seen)
+
+    def test_without_an_api_hub_token_the_deploy_uses_a_connection_the_user_has(self):
+        def refuse(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(json.dumps(
+                {"error": "invalid_grant", "error_description": "AADSTS65001: not consented. Trace ID: 1"}).encode()))
+        job = self.queue({"rapplication": "@x/y"}, refresh="rt-1")
+        status = self.execute(job, rapplications=self.rapp_module(codeapp=False, files=True), client_id="app",
+                              opener=refuse)
+        self.assertEqual(status["state"], "succeeded", status.get("error"))
+        self.assertIsNone(self.calls[1][4]["get_apihub_token"])
+        self.assertIn("a SharePoint connection you already have", " ".join(status["log"]))
+        job = self.queue({"rapplication": "@x/y"}, refresh="rt-1")          # no files: no API Hub token asked for
+        self.calls.clear()
+        self.execute(job, rapplications=self.rapp_module(codeapp=False), client_id="app", opener=refuse)
+        self.assertIsNone(self.calls[1][4]["get_apihub_token"])
 
     def test_a_powerapps_token_is_got_with_the_refresh_token_and_its_own_scope(self):
         seen = []
@@ -550,6 +586,20 @@ class FunctionRouteTests(unittest.TestCase):
             status, body, queued = self.post(self.create, "jobs", {"environment": ENV, **bad}, token())
             self.assertEqual((status, queued), (code, []), bad)
             self.assertIn(why, body["error"])
+
+    def test_where_a_rapplication_reads_files_is_checked_and_queued(self):
+        status, body, queued = self.post(self.create, "jobs", {
+            "environment": ENV, "rapplication": "@rapp/json_doctor", "filesSite": "https://contoso.sharepoint.com/sites/team/",
+            "filesFolder": "/Shared Documents/RAPP"}, token())
+        self.assertEqual(status, 202, body)
+        request = self.store.get(f"{body['job']}/request.json")
+        self.assertEqual((request["files_site"], request["files_folder"]),
+                         ("https://contoso.sharepoint.com/sites/team", "/Shared Documents/RAPP"))
+        for bad in ({"filesSite": "https://evil.example.com/sites/x"}, {"filesSite": "http://contoso.sharepoint.com"},
+                    {"filesFolder": "Shared Documents"}, {"filesFolder": "/Shared Documents/../x"}):
+            status, body, queued = self.post(self.create, "jobs", {"environment": ENV, "rapplication": "json_doctor",
+                                                                   **bad}, token())
+            self.assertEqual((status, queued), (400, []), bad)
 
     def test_the_powerapps_sign_in_asks_for_the_power_apps_permission(self):
         signin = self.fa.signin.build().get_user_function()

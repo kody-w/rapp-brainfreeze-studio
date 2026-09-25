@@ -1,0 +1,485 @@
+{
+ "agent": "JsonDoctor",
+ "class": "JsonDoctorAgent",
+ "mode": "connector-code",
+ "flow_name": "JsonDoctorFlow",
+ "component": "JSON Doctor",
+ "description": "Inspect, validate, diff or query a JSON or JSONL file in the connected SharePoint library, without opening it: infers its shape with per-field coverage, points at the exact line and column of a syntax error, compares two files structurally, pulls a value out by dotted path. Set `action` to exactly one of: inspect, validate, diff, query. `path` is the file's path in the library, for example data/users.json; `other` is the second file, for diff; `key` is the dotted path, for query, for example 0.name or users.2.email.",
+ "script": "json_doctor.csx",
+ "source_sha256": "e532be574326b108ede0dbbd7d3c012cf275c9f2aee51793864c45546938f20e",
+ "python": "3.11",
+ "file_inputs": [
+  "path",
+  "other"
+ ],
+ "file_home": "sharepoint",
+ "inputs": {
+  "action": {
+   "type": "string",
+   "description": "inspect, validate, diff or query"
+  },
+  "path": {
+   "type": "string",
+   "description": "The file's path in the library, for example data/users.json"
+  },
+  "other": {
+   "type": "string",
+   "description": "A second file's path, for diff"
+  },
+  "key": {
+   "type": "string",
+   "description": "A dotted path for query, for example users.0.name"
+  }
+ },
+ "required": [
+  "action",
+  "path"
+ ],
+ "fixtures": {
+  "data/users.json": {
+   "text": "[\n  {\n    \"id\": 1,\n    \"name\": \"user1\",\n    \"email\": \"u1@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 23.8,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 2,\n    \"name\": \"user2\",\n    \"email\": \"u2@example.com\",\n    \"tags\": [],\n    \"score\": 54.42,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 3,\n    \"name\": \"user3\",\n    \"email\": null,\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 37.0,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 4,\n    \"name\": \"user4\",\n    \"email\": \"u4@example.com\",\n    \"tags\": [],\n    \"score\": 4,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 5,\n    \"name\": \"user5\",\n    \"email\": \"u5@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 60.39,\n    \"profile\": {}\n  },\n  {\n    \"id\": 6,\n    \"name\": \"user6\",\n    \"email\": null,\n    \"tags\": [],\n    \"score\": 62.57,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 7,\n    \"name\": \"user7\",\n    \"email\": \"u7@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 6.55,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    },\n    \"legacy\": true\n  },\n  {\n    \"id\": 8,\n    \"name\": \"user8\",\n    \"email\": \"u8@example.com\",\n    \"tags\": [],\n    \"score\": 8,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 9,\n    \"name\": \"user9\",\n    \"email\": null,\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 1.32,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 10,\n    \"name\": \"user10\",\n    \"email\": \"u10@example.com\",\n    \"tags\": [],\n    \"score\": 83.75,\n    \"profile\": {}\n  },\n  {\n    \"id\": 11,\n    \"name\": \"user11\",\n    \"email\": \"u11@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 25.94,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 12,\n    \"name\": \"user12\",\n    \"email\": null,\n    \"tags\": [],\n    \"score\": 12,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 13,\n    \"name\": \"user13\",\n    \"email\": \"u13@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 23.43,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 14,\n    \"name\": \"user14\",\n    \"email\": \"u14@example.com\",\n    \"tags\": [],\n    \"score\": 99.56,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    },\n    \"legacy\": true\n  },\n  {\n    \"id\": 15,\n    \"name\": \"user15\",\n    \"email\": null,\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 47.03,\n    \"profile\": {}\n  },\n  {\n    \"id\": 16,\n    \"name\": \"user16\",\n    \"email\": \"u16@example.com\",\n    \"tags\": [],\n    \"score\": 16,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 17,\n    \"name\": \"user17\",\n    \"email\": \"u17@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 83.65,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 18,\n    \"name\": \"user18\",\n    \"email\": null,\n    \"tags\": [],\n    \"score\": 47.64,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 19,\n    \"name\": \"user19\",\n    \"email\": \"u19@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 63.91,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 20,\n    \"name\": \"user20\",\n    \"email\": \"u20@example.com\",\n    \"tags\": [],\n    \"score\": 20,\n    \"profile\": {}\n  },\n  {\n    \"id\": 21,\n    \"name\": \"user21\",\n    \"email\": null,\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 15.06,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    },\n    \"legacy\": true\n  },\n  {\n    \"id\": 22,\n    \"name\": \"user22\",\n    \"email\": \"u22@example.com\",\n    \"tags\": [],\n    \"score\": 63.49,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 23,\n    \"name\": \"user23\",\n    \"email\": \"u23@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 86.8,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 24,\n    \"name\": \"user24\",\n    \"email\": null,\n    \"tags\": [],\n    \"score\": 24,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 25,\n    \"name\": \"user25\",\n    \"email\": \"u25@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 52.32,\n    \"profile\": {}\n  },\n  {\n    \"id\": 26,\n    \"name\": \"user26\",\n    \"email\": \"u26@example.com\",\n    \"tags\": [],\n    \"score\": 74.13,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 27,\n    \"name\": \"user27\",\n    \"email\": null,\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 67.14,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 28,\n    \"name\": \"user28\",\n    \"email\": \"u28@example.com\",\n    \"tags\": [],\n    \"score\": 28,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    },\n    \"legacy\": true\n  },\n  {\n    \"id\": 29,\n    \"name\": \"user29\",\n    \"email\": \"u29@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 6.4,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 30,\n    \"name\": \"user30\",\n    \"email\": null,\n    \"tags\": [],\n    \"score\": 75.82,\n    \"profile\": {}\n  },\n  {\n    \"id\": 31,\n    \"name\": \"user31\",\n    \"email\": \"u31@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 59.11,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 32,\n    \"name\": \"user32\",\n    \"email\": \"u32@example.com\",\n    \"tags\": [],\n    \"score\": 32,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 33,\n    \"name\": \"user33\",\n    \"email\": null,\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 30.13,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 34,\n    \"name\": \"user34\",\n    \"email\": \"u34@example.com\",\n    \"tags\": [],\n    \"score\": 3.1,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 35,\n    \"name\": \"user35\",\n    \"email\": \"u35@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 86.55,\n    \"profile\": {},\n    \"legacy\": true\n  },\n  {\n    \"id\": 36,\n    \"name\": \"user36\",\n    \"email\": null,\n    \"tags\": [],\n    \"score\": 36,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 37,\n    \"name\": \"user37\",\n    \"email\": \"u37@example.com\",\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 47.27,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 38,\n    \"name\": \"user38\",\n    \"email\": \"u38@example.com\",\n    \"tags\": [],\n    \"score\": 71.88,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 39,\n    \"name\": \"user39\",\n    \"email\": null,\n    \"tags\": [\n      \"a\",\n      \"b\"\n    ],\n    \"score\": 87.88,\n    \"profile\": {\n      \"city\": \"Oslo\"\n    }\n  },\n  {\n    \"id\": 40,\n    \"name\": \"user40\",\n    \"email\": \"u40@example.com\",\n    \"tags\": [],\n    \"score\": 40,\n    \"profile\": {}\n  }\n]"
+  },
+  "data/users_v2.json": {
+   "text": "[{\"id\": \"1\", \"name\": \"user1\", \"email\": \"u1@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 23.8, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"2\", \"name\": \"user2\", \"email\": \"u2@example.com\", \"tags\": [], \"score\": 54.42, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"3\", \"name\": \"user3\", \"email\": null, \"tags\": [\"a\", \"b\"], \"score\": 37.0, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"4\", \"name\": \"user4\", \"email\": \"u4@example.com\", \"tags\": [], \"score\": 4, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"5\", \"name\": \"user5\", \"email\": \"u5@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 60.39, \"profile\": {}, \"active\": true}, {\"id\": \"6\", \"name\": \"user6\", \"email\": null, \"tags\": [], \"score\": 62.57, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"7\", \"name\": \"user7\", \"email\": \"u7@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 6.55, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"8\", \"name\": \"user8\", \"email\": \"u8@example.com\", \"tags\": [], \"score\": 8, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"9\", \"name\": \"user9\", \"email\": null, \"tags\": [\"a\", \"b\"], \"score\": 1.32, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"10\", \"name\": \"user10\", \"email\": \"u10@example.com\", \"tags\": [], \"score\": 83.75, \"profile\": {}, \"active\": true}, {\"id\": \"11\", \"name\": \"user11\", \"email\": \"u11@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 25.94, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"12\", \"name\": \"user12\", \"email\": null, \"tags\": [], \"score\": 12, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"13\", \"name\": \"user13\", \"email\": \"u13@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 23.43, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"14\", \"name\": \"user14\", \"email\": \"u14@example.com\", \"tags\": [], \"score\": 99.56, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"15\", \"name\": \"user15\", \"email\": null, \"tags\": [\"a\", \"b\"], \"score\": 47.03, \"profile\": {}, \"active\": true}, {\"id\": \"16\", \"name\": \"user16\", \"email\": \"u16@example.com\", \"tags\": [], \"score\": 16, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"17\", \"name\": \"user17\", \"email\": \"u17@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 83.65, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"18\", \"name\": \"user18\", \"email\": null, \"tags\": [], \"score\": 47.64, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"19\", \"name\": \"user19\", \"email\": \"u19@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 63.91, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"20\", \"name\": \"user20\", \"email\": \"u20@example.com\", \"tags\": [], \"score\": 20, \"profile\": {}, \"active\": true}, {\"id\": \"21\", \"name\": \"user21\", \"email\": null, \"tags\": [\"a\", \"b\"], \"score\": 15.06, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"22\", \"name\": \"user22\", \"email\": \"u22@example.com\", \"tags\": [], \"score\": 63.49, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"23\", \"name\": \"user23\", \"email\": \"u23@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 86.8, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"24\", \"name\": \"user24\", \"email\": null, \"tags\": [], \"score\": 24, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"25\", \"name\": \"user25\", \"email\": \"u25@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 52.32, \"profile\": {}, \"active\": true}, {\"id\": \"26\", \"name\": \"user26\", \"email\": \"u26@example.com\", \"tags\": [], \"score\": 74.13, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"27\", \"name\": \"user27\", \"email\": null, \"tags\": [\"a\", \"b\"], \"score\": 67.14, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"28\", \"name\": \"user28\", \"email\": \"u28@example.com\", \"tags\": [], \"score\": 28, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"29\", \"name\": \"user29\", \"email\": \"u29@example.com\", \"tags\": [\"a\", \"b\"], \"score\": 6.4, \"profile\": {\"city\": \"Oslo\"}, \"active\": true}, {\"id\": \"30\", \"name\": \"user30\", \"email\": null, \"tags\": [], \"score\": 75.82, \"profile\": {}, \"active\": true}]"
+  },
+  "data/events.jsonl": {
+   "text": "{\"ts\": \"2026-09-01\", \"kind\": \"view\", \"n\": 1.5, \"user\": 1}\n{\"ts\": \"2026-09-02\", \"kind\": \"click\", \"n\": 3.0, \"user\": 2}\n{\"ts\": \"2026-09-03\", \"kind\": \"view\", \"n\": 4.5}\n{\"ts\": \"2026-09-04\", \"kind\": \"click\", \"n\": 6.0, \"user\": 4}\n{\"ts\": \"2026-09-05\", \"kind\": \"view\", \"n\": 7.5, \"user\": 5}\n{\"ts\": \"2026-09-06\", \"kind\": \"click\", \"n\": 9.0}\n{\"ts\": \"2026-09-07\", \"kind\": \"view\", \"n\": 10.5, \"user\": 7}\n{\"ts\": \"2026-09-08\", \"kind\": \"click\", \"n\": 12.0, \"user\": 8}\n{\"ts\": \"2026-09-09\", \"kind\": \"view\", \"n\": 13.5}\n{\"ts\": \"2026-09-10\", \"kind\": \"click\", \"n\": 15.0, \"user\": 10}\n{\"ts\": \"2026-09-11\", \"kind\": \"view\", \"n\": 16.5, \"user\": 11}\n{\"ts\": \"2026-09-12\", \"kind\": \"click\", \"n\": 18.0}\n{\"ts\": \"2026-09-13\", \"kind\": \"view\", \"n\": 19.5, \"user\": 13}\n{\"ts\": \"2026-09-14\", \"kind\": \"click\", \"n\": 21.0, \"user\": 14}\n{\"ts\": \"2026-09-15\", \"kind\": \"view\", \"n\": 22.5}\n{\"ts\": \"2026-09-16\", \"kind\": \"click\", \"n\": 24.0, \"user\": 16}\n{\"ts\": \"2026-09-17\", \"kind\": \"view\", \"n\": 25.5, \"user\": 17}\n{\"ts\": \"2026-09-18\", \"kind\": \"click\", \"n\": 27.0}\n{\"ts\": \"2026-09-19\", \"kind\": \"view\", \"n\": 28.5, \"user\": 19}\n{\"ts\": \"2026-09-20\", \"kind\": \"click\", \"n\": 30.0, \"user\": 20}\n\n"
+  },
+  "data/events_crlf.jsonl": {
+   "base64": "eyJhIjogMX0NCnsiYSI6IDIsICJiIjogIngifQ0KDQp7ImEiOiAzfQ0K"
+  },
+  "data/broken.json": {
+   "text": "{\n  \"name\": \"doctor\",\n  \"items\": [1, 2, 3,],\n  \"ok\": true\n}\n"
+  },
+  "data/broken_line.jsonl": {
+   "text": "{\"a\": 1}\n{\"a\": 2}\n{\"a\": \n{\"a\": 4}\n"
+  },
+  "data/trailing.json": {
+   "text": "{\"a\": 1} {\"b\": 2}"
+  },
+  "data/empty.json": {
+   "text": ""
+  },
+  "data/scalar.json": {
+   "text": "42"
+  },
+  "data/strings.json": {
+   "text": "[\"x\", \"y\", 3, null, true]"
+  },
+  "data/nested.json": {
+   "text": "{\"org\": {\"teams\": [{\"name\": \"core\", \"members\": [{\"name\": \"Ada\", \"role\": \"lead\"}, {\"name\": \"Lin\"}]}, {\"name\": \"ops\", \"members\": []}]}, \"count\": 2, \"ratio\": 0.3333333333333333, \"big\": 12345678901234567890, \"neg\": -0.0, \"e\": 1e+16, \"tiny\": 1e-07}"
+  },
+  "data/unicode.json": {
+   "text": "[{\"name\": \"Café ☕\", \"note\": \"𝄞 music\", \"long\": \"LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLé\"}, {\"name\": \"日本\", \"note\": \"\"}]"
+  },
+  "data/bom.json": {
+   "base64": "77u/eyJhIjogMX0="
+  },
+  "data/emoji_error.json": {
+   "text": "{\"😀\": [1, 2,, 3]}"
+  },
+  "data/halves.json": {
+   "text": "[{\"a\": 1, \"b\": 1}, {\"a\": 1}, {\"a\": 1, \"b\": 2}, {\"a\": 1}, {\"a\": 1}, {\"a\": 1}, {\"a\": 1}, {\"a\": 1}]"
+  },
+  "data/dups.json": {
+   "text": "{\"k\": 1, \"j\": 2, \"k\": 3}"
+  },
+  "data/samples.json": {
+   "text": "[{\"z\": 0, \"f\": false, \"e\": \"\", \"l\": [], \"o\": {}}, {\"z\": 5, \"f\": true, \"e\": \"x\", \"l\": [1], \"o\": {\"a\": 1}}]"
+  },
+  "notes.txt": {
+   "text": "{\"plain\": \"text file holding JSON\"}"
+  }
+ },
+ "sequences": [
+  [
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/users.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/events.jsonl"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/events_crlf.jsonl"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/scalar.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/strings.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/nested.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/unicode.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/halves.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/dups.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/samples.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "notes.txt"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/users.json"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/broken.json"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/broken_line.jsonl"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/trailing.json"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/empty.json"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/bom.json"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/emoji_error.json"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/events.jsonl"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": "data/scalar.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/broken.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/broken_line.jsonl"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/empty.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/bom.json"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "0.name"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "-1.email"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "3.tags"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "3.tags.1"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "39.profile.city"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "40"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "x"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "0.nope"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "0.id.x"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": ""
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "0..name"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": "1_0.name"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/users.json",
+     "key": " 2 .id"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "org.teams.0.members.1"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "org.teams.1.members"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "big"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "neg"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "e"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "tiny"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "ratio"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/nested.json",
+     "key": "org.teams.0.name.x"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/scalar.json"
+    }
+   },
+   {
+    "args": {
+     "action": "query",
+     "path": "data/scalar.json",
+     "key": "a"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/users.json",
+     "other": "data/users_v2.json"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/users_v2.json",
+     "other": "data/users.json"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/users.json",
+     "other": "data/users.json"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/events.jsonl",
+     "other": "data/events_crlf.jsonl"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/users.json",
+     "other": "data/missing.json"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/users.json"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/users.json",
+     "other": "data/broken.json"
+    }
+   },
+   {
+    "args": {
+     "action": "diff",
+     "path": "data/scalar.json",
+     "other": "data/strings.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect",
+     "path": "data/missing.json"
+    }
+   },
+   {
+    "args": {
+     "action": "inspect"
+    }
+   },
+   {
+    "args": {
+     "action": "bogus",
+     "path": "data/users.json"
+    }
+   },
+   {
+    "args": {
+     "path": "data/users.json"
+    }
+   },
+   {
+    "args": {
+     "action": "validate",
+     "path": ""
+    }
+   }
+  ]
+ ]
+}

@@ -16,6 +16,18 @@ public class PyException : Exception
     public PyException(string pyType, string message) : base(message) { PyType = pyType; }
 }
 
+// json.JSONDecodeError: msg, pos, lineno and colno, counted in code points as Python counts them
+public class PyJsonDecodeError : PyException
+{
+    public string Msg { get; }
+    public int Pos { get; }
+    public int LineNo { get; }
+    public int ColNo { get; }
+    public PyJsonDecodeError(string msg, int pos, int lineno, int colno)
+        : base("JSONDecodeError", msg + ": line " + lineno + " column " + colno + " (char " + pos + ")")
+    { Msg = msg; Pos = pos; LineNo = lineno; ColNo = colno; }
+}
+
 public static class Py
 {
     // str.isspace(), for the characters strip() removes when called with no argument
@@ -201,6 +213,54 @@ public static class Py
     // == between two Python values from JSON
     public static bool Eq(JToken a, JToken b) { return JToken.DeepEquals(a ?? JValue.CreateNull(), b ?? JValue.CreateNull()); }
 
+    // str.splitlines(): every line boundary Python knows, the boundaries dropped
+    public static List<string> SplitLines(string s)
+    {
+        var lines = new List<string>();
+        int start = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            bool boundary = c == '\n' || c == '\r' || c == '\v' || c == '\f' || c == '\x1c' || c == '\x1d' || c == '\x1e'
+                            || c == '\x85' || c == '\u2028' || c == '\u2029';
+            if (!boundary) continue;
+            lines.Add(s.Substring(start, i - start));
+            if (c == '\r' && i + 1 < s.Length && s[i + 1] == '\n') i++;
+            start = i + 1;
+        }
+        if (start < s.Length) lines.Add(s.Substring(start));
+        return lines;
+    }
+
+    // f"{x:.0f}": the double's exact value rounded half to even (a tie is exactly representable: x * 2 is odd)
+    public static string Format0f(double x)
+    {
+        if (double.IsNaN(x)) return "nan";
+        if (double.IsInfinity(x)) return x > 0 ? "inf" : "-inf";
+        bool neg = x < 0 || (x == 0 && 1 / x < 0);
+        double a = Math.Abs(x);
+        double f = Math.Floor(a);
+        double frac = a - f;                                  // exact: f and a are within 1 of each other
+        double r = frac > 0.5 ? f + 1 : frac < 0.5 ? f : (f % 2 == 0 ? f : f + 1);
+        return (neg ? "-" : "") + r.ToString("F0", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    // seq[i] with Python's negative indexes
+    public static JToken Index(JArray a, long i)
+    {
+        long at = i < 0 ? i + a.Count : i;
+        if (at < 0 || at >= a.Count) throw new PyException("IndexError", "list index out of range");
+        return a[(int)at];
+    }
+
+    public static int Len(string s)
+    {
+        int n = 0;
+        for (int i = 0; i < s.Length; i++, n++)
+            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) i++;
+        return n;
+    }
+
     // Python's ordering of two str values: by code point
     public static int Compare(string a, string b) { return string.CompareOrdinal(a, b); }
 }
@@ -369,6 +429,7 @@ public static class PyJson
     public static JToken Loads(string s)
     {
         var p = new Parser(s);
+        if (s.Length > 0 && s[0] == '\ufeff') throw p.Error("Unexpected UTF-8 BOM (decode using utf-8-sig)", 0);
         int i = p.SkipWs(0);
         int end;
         JToken v = p.Value(i, out end);
@@ -390,9 +451,15 @@ public static class PyJson
 
         public PyException Error(string msg, int pos)
         {
-            int line = 1, last = -1;
-            for (int k = 0; k < pos && k < s.Length; k++) if (s[k] == '\n') { line++; last = k; }
-            return new PyException("JSONDecodeError", msg + ": line " + line + " column " + (pos - last) + " (char " + pos + ")");
+            // Python's positions count code points; a UTF-16 string counts an astral character twice
+            int line = 1, cp = 0, lastNewlineCp = -1;
+            for (int k = 0; k < pos && k < s.Length; k++)
+            {
+                if (char.IsLowSurrogate(s[k]) && k > 0 && char.IsHighSurrogate(s[k - 1])) continue;
+                if (s[k] == '\n') { line++; lastNewlineCp = cp; }
+                cp++;
+            }
+            return new PyJsonDecodeError(msg, cp, line, cp - lastNewlineCp);
         }
 
         bool Match(int i, string word) { return i + word.Length <= s.Length && string.CompareOrdinal(s, i, word, 0, word.Length) == 0; }
@@ -568,8 +635,41 @@ public class Call
 
     public Call(string requestBody) : this((JObject)ParseJson(requestBody)) { }
 
+    public JObject Files { get; private set; }
+
+    // os.path.isfile(path), for the files the flow read (from SharePoint) and passed in
+    public bool IsFile(JToken path)
+    {
+        if (!Py.IsStr(path)) return false;
+        var v = Files[(string)path];
+        return v != null && v.Type == JTokenType.String;
+    }
+
+    public byte[] Bytes(string path) { return Convert.FromBase64String((string)Files[path]); }
+
+    // open(path, encoding="utf-8").read(): strict UTF-8, universal newlines
+    public string ReadText(string path)
+    {
+        string text;
+        try { text = new UTF8Encoding(false, true).GetString(Bytes(path)); }
+        catch (DecoderFallbackException e) { throw new PyException("UnicodeDecodeError", "'utf-8' codec can't decode bytes: " + e.Message); }
+        return text.Replace("\r\n", "\n").Replace('\r', '\n');
+    }
+
     public Call(JObject request)
     {
+        // the flow sends each file input as {path, content}: the path the call named and its bytes (base64), or
+        // null when the library has no such file. Paths aren't keys on the wire (a flow can't make a key with a dot)
+        Files = new JObject();
+        var given = request["files"] as JObject;
+        if (given != null)
+            foreach (var input in given.Properties())
+            {
+                var entry = input.Value as JObject;
+                var path = entry == null ? null : entry["path"];
+                if (path != null && path.Type == JTokenType.String && ((string)path).Length > 0)
+                    Files[(string)path] = entry["content"] ?? JValue.CreateNull();
+            }
         Args = (request["args"] as JObject) ?? new JObject();
         // an input the caller didn't give reaches the flow as null: the agent sees it as not passed
         foreach (var p in Args.Properties().Where(p => p.Value.Type == JTokenType.Null).ToList()) p.Remove();

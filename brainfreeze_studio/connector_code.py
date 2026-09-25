@@ -22,6 +22,7 @@ pure function of its request and a proof can fix them. A proof case is a sequenc
 to the next, in both runs. Compiling needs the .NET SDK (`dotnet`); the first build restores Newtonsoft.Json from
 NuGet.
 """
+import base64
 import hashlib
 import json
 import os
@@ -281,8 +282,23 @@ cls = next(v for v in vars(mod).values() if isinstance(v, type) and issubclass(v
            and v is not basic.BasicAgent and v.__module__ == mod.__name__)
 agent = cls()
 
+import base64 as _b64, os as _os, shutil as _shutil, tempfile as _tempfile
+_home = _os.getcwd()
+
 for line in sys.stdin:
     case = json.loads(line)
+    # the files the call names, as the flow read them from the user's library: a fresh folder holding just those
+    _library = _tempfile.mkdtemp(prefix="bfs-library-")
+    for _rel, _data in (case.get("library") or {}).items():
+        if _data is None:
+            continue
+        if _os.path.isabs(_rel) or ".." in _rel.replace("\\", "/").split("/"):
+            raise SystemExit(f"fixture path must stay inside the library: {_rel}")
+        _target = _os.path.join(_library, _rel)
+        _os.makedirs(_os.path.dirname(_target) or _library, exist_ok=True)
+        with open(_target, "wb") as _f:
+            _f.write(_b64.b64decode(_data))
+    _os.chdir(_library)
     files = dict(case.get("state") or {})
     written = {}
     def workspace_read(key):
@@ -302,6 +318,9 @@ for line in sys.stdin:
         out = out if isinstance(out, str) else json.dumps(out)
     except Exception as e:
         out = f"{type(e).__name__}: {e}"
+    finally:
+        _os.chdir(_home)
+        _shutil.rmtree(_library, ignore_errors=True)
     print(json.dumps({"output": out, "state": written}), flush=True)
 '''
 
@@ -311,6 +330,38 @@ def derived_ids(base, count):
     derives them the same way."""
     head, tail = base[:-12], int(base[-12:], 16)
     return [base] + [f"{head}{(tail + k) % (1 << 48):012x}" for k in range(1, count)]
+
+
+def fixture_bytes(fixture):
+    return base64.b64decode(fixture["base64"]) if "base64" in fixture else fixture["text"].encode("utf-8")
+
+
+def library_path(path):
+    """Whether the flow reads this path from the library: a relative path that stays inside the folder (no leading
+    slash, no `..` step). Anything else reaches the code as a file that isn't there."""
+    p = path.replace("\\", "/")
+    return not p.startswith("/") and ".." not in p.split("/")
+
+
+def files_body(spec, args):
+    """The files member of the request the flow sends: each file input as {path, content}, the path the call named
+    (or null) and the file's bytes as base64 (null when there is no such file, or it isn't inside the folder)."""
+    named = named_files(spec, args)
+    return {name: {"path": args.get(name), "content": named.get(args.get(name)) if isinstance(args.get(name), str) else None}
+            for name in spec.get("file_inputs") or []}
+
+
+def named_files(spec, args):
+    """The files a call names ({path: base64 | None}), as its flow reads them from the user's library: only the file
+    inputs the call gives, each with its content, or None when the library has no such file."""
+    fixtures = spec.get("fixtures") or {}
+    out = {}
+    for name in spec.get("file_inputs") or []:
+        path = args.get(name)
+        if isinstance(path, str) and path:
+            found = path in fixtures and library_path(path)
+            out[path] = base64.b64encode(fixture_bytes(fixtures[path])).decode() if found else None
+    return out
 
 
 class _Session:
@@ -334,6 +385,9 @@ class _Session:
             self.p.wait(timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             self.p.kill()
+            self.p.wait()
+        for pipe in (self.p.stdout, self.p.stderr):
+            pipe.close()
 
 
 LIBRARY = Path(__file__).with_name("connector_lib") / "PyCompat.cs"
@@ -346,9 +400,10 @@ def linked(script_text):
     return script_text.rstrip() + "\n\n" + lib
 
 
-def prove(spec, agent_file, basic_file, script_file, python=None):
+def prove(spec, agent_file, basic_file, script_file, python=None, records=False):
     """Run every sequence of the spec through the real Python and the compiled C#; each carries its own state from
-    call to call. Parity means every output and every file written is identical."""
+    call to call. Parity means every output and every file written is identical. records=True keeps every call's
+    pair of outputs in the result (evidence)."""
     script = linked(Path(script_file).read_text(encoding="utf-8"))
     dll = compile_script(script)
     workspace = bool((spec.get("state") or {}).get("files"))
@@ -367,10 +422,13 @@ def prove(spec, agent_file, basic_file, script_file, python=None):
                 now = call.get("now") or spec.get("now") or "2026-09-25T10:00:00Z"
                 ident = call.get("id") or f"00000000-0000-4000-8000-{n:04x}{k:08x}"
                 responses = {**(spec.get("responses") or {}), **(call.get("responses") or {})}
+                library = named_files(spec, call["args"])
                 out_py = py.ask({"args": call["args"], "state": py_state, "now": now, "ids": derived_ids(ident, 64),
-                                 "workspace": workspace, "responses": responses})
-                raw = cs.ask({"operationId": spec.get("operation", "Run"), "responses": responses,
-                              "body": {"args": call["args"], "state": cs_state, "now": now, "id": ident}})
+                                 "workspace": workspace, "responses": responses, "library": library})
+                body = {"args": call["args"], "state": cs_state, "now": now, "id": ident}
+                if spec.get("file_inputs"):
+                    body["files"] = files_body(spec, call["args"])
+                raw = cs.ask({"operationId": spec.get("operation", "Run"), "responses": responses, "body": body})
                 try:
                     out_cs = json.loads(raw["body"]) if raw["status"] == 200 else {
                         "output": f"HTTP {raw['status']}: {raw['body']}", "state": {}}
@@ -386,10 +444,13 @@ def prove(spec, agent_file, basic_file, script_file, python=None):
         cs.close()
         shutil.rmtree(tmp, ignore_errors=True)
     passed = sum(r["match"] for r in results)
-    return {"agent": spec["agent"], "mode": "connector-code", "cases": len(results), "passed": passed,
-            "parity": passed == len(results) and bool(results), "sequences": len(spec["sequences"]),
-            "mismatches": [r for r in results if not r["match"]][:10],
-            "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest()}
+    proof = {"agent": spec["agent"], "mode": "connector-code", "cases": len(results), "passed": passed,
+             "parity": passed == len(results) and bool(results), "sequences": len(spec["sequences"]),
+             "mismatches": [r for r in results if not r["match"]][:10],
+             "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest()}
+    if records:
+        proof["records"] = results
+    return proof
 
 
 # ── what a proven port becomes: a custom connector, and the flow that runs it with the agent's state ─────────────
@@ -411,6 +472,10 @@ def openapi(spec, display):
         "state": {"type": "object", "description": "The agent's workspace files: name → text (null when absent)"},
         "now": {"type": "string", "description": "The time of the call, yyyy-MM-ddTHH:mm:ssZ"},
         "id": {"type": "string", "description": "A fresh guid for anything the call creates"}}}
+    if spec.get("file_inputs"):
+        body["properties"]["files"] = {"type": "object", "description": "The files the call names, read from the "
+                                       "SharePoint library: for each file input, {path, content}, the content in base64 "
+                                       "(null when there is no such file)"}
     reply = {"type": "object", "properties": {"output": {"type": "string", "description": "What the agent returned"},
                                                "state": {"type": "object", "description": "The files it wrote"}}}
     return {"swagger": "2.0",
@@ -439,13 +504,35 @@ def state_subject(schema_name, file):
     return f"{STATE_PREFIX}/{schema_name}/{file}"
 
 
-def compile_flow(spec, schema_name, display_name, connector_display, connector_logical):
-    """The agent flow for a connector-code tool: read the workspace files (Dataverse notes), run the code with the
-    tool's inputs, write back the files it changed, return its output. `{{CONNECTOR:...}}` is the connector's
-    internal id, filled in at deploy."""
+FILES_API = "shared_sharepointonline"
+DEFAULT_FILES_FOLDER = "/Shared Documents"
+FILES_SETTINGS = (("site", "RAPP Files Site", "The SharePoint site whose library holds the files RAPP agents read, "
+                   "for example https://contoso.sharepoint.com/sites/team"),
+                  ("folder", "RAPP Files Folder", "The folder in that site the agents' paths start from, for example "
+                   "/Shared Documents"))
+
+
+def files_parameters(schema_name, site="", folder=None):
+    """Where agents that read files find them, as the flow parameters and environment variables that hold it: the
+    site and the folder (a library, or a folder in one). One pair per publisher prefix, shared by its agents."""
+    from .flows import _setting_param
+    values = {"site": site or "", "folder": folder or DEFAULT_FILES_FOLDER}
+    out = {}
+    for key, display, description in FILES_SETTINGS:
+        parameter, env_schema = _setting_param(schema_name, key, {"display": display})
+        out[key] = {"parameter": parameter, "schemaName": env_schema, "displayName": display,
+                    "description": description, "defaultValue": values[key]}
+    return out
+
+
+def compile_flow(spec, schema_name, display_name, connector_display, connector_logical, files_home=None):
+    """The agent flow for a connector-code tool: read the workspace files (Dataverse notes) and the files the call
+    names (SharePoint), run the code with the tool's inputs, write back the files it changed, return its output.
+    `{{CONNECTOR:...}}` is the connector's internal id, filled in at deploy."""
     from .flows import _within_limits
     placeholder = CONNECTOR_PLACEHOLDER % connector_display
     files = list((spec.get("state") or {}).get("files") or [])
+    file_inputs = list(spec.get("file_inputs") or [])
     dataverse = {"apiId": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
                  "connectionName": "shared_commondataserviceforapps"}
     auth = "@parameters('$authentication')"
@@ -462,13 +549,48 @@ def compile_flow(spec, schema_name, display_name, connector_display, connector_l
     state = {f: (f"@if(empty(outputs('{_action_name('Read', f)}')?['body/value']), null, "
                  f"base64ToString(first(outputs('{_action_name('Read', f)}')?['body/value'])?['documentbody']))")
              for f in files}
+    # the files the call names: each read from the library when it is a path inside the folder; one that can't be
+    # read (missing, or outside the folder) fails its read, and the code gets null for it, which it answers as a
+    # missing file. The code is told {input: {path, content}}: a path can't be a key (setProperty refuses dots)
+    settings = files_parameters(schema_name, **(files_home or {})) if file_inputs else {}
+    sharepoint = {"apiId": f"/providers/Microsoft.PowerApps/apis/{FILES_API}", "connectionName": FILES_API}
+    read_done = ["Succeeded", "Failed", "TimedOut"]
+    named = {}
+    for k in file_inputs:
+        value = f"triggerBody()?['{k}']"
+        slashed = f"replace(string({value}), '\\', '/')"
+        get, guard = _action_name("Get_file", k), _action_name("Read_file", k)
+        actions[guard] = {
+            "type": "If", "runAfter": ({last: read_done if last.startswith("Read_file_") else ["Succeeded"]}
+                                       if last else {}),
+            "expression": {"and": [{"not": {"equals": [f"@empty({value})", "@true"]}},
+                                   {"not": {"startsWith": [f"@{slashed}", "/"]}},
+                                   {"not": {"contains": [f"@concat('/', {slashed}, '/')", "/../"]}}]},
+            "actions": {get: {"type": "OpenApiConnection", "runAfter": {},
+                              "inputs": {"host": {**sharepoint, "operationId": "GetFileContentByPath"},
+                                         "parameters": {"dataset": f"@parameters('{settings['site']['parameter']}')",
+                                                        "path": f"@concat(parameters('{settings['folder']['parameter']}'), '/', {value})",
+                                                        "inferContentType": False,
+                                                        "queryParametersSingleEncoded": True},
+                                         "authentication": auth}}},
+            "else": {"actions": {}}}
+        # both branches of if() may be evaluated, and a skipped or failed read has no content: go through actions().
+        # A read that worked has its bytes in body.$content, except an empty file's, which comes back with no body
+        named[k] = {"path": f"@{value}",
+                    "content": (f"@if(equals(actions('{get}')?['status'], 'Succeeded'), "
+                                f"coalesce(actions('{get}')?['outputs']?['body']?['$content'], ''), null)")}
+        last = guard
     args = {k: f"@triggerBody()?['{k}']" for k in spec["inputs"]}
-    actions["Run_the_agent"] = {"type": "OpenApiConnection", "runAfter": {last: ["Succeeded"]} if last else {},
+    parameters = {"body/args": args, "body/state": state, "body/now": "@utcNow('yyyy-MM-ddTHH:mm:ssZ')",
+                  "body/id": "@guid()"}
+    if named:
+        parameters["body/files"] = named
+    actions["Run_the_agent"] = {"type": "OpenApiConnection",
+                                "runAfter": ({last: read_done if last.startswith("Read_file_") else ["Succeeded"]}
+                                             if last else {}),
                                 "inputs": {"host": {"apiId": f"/providers/Microsoft.PowerApps/apis/{placeholder}",
                                                     "connectionName": "shared_rapp_code", "operationId": "Run"},
-                                           "parameters": {"body/args": args, "body/state": state,
-                                                          "body/now": "@utcNow('yyyy-MM-ddTHH:mm:ssZ')",
-                                                          "body/id": "@guid()"},
+                                           "parameters": parameters,
                                            "authentication": auth}}
     last = "Run_the_agent"
     for f in files:
@@ -515,11 +637,18 @@ def compile_flow(spec, schema_name, display_name, connector_display, connector_l
         refs["shared_commondataserviceforapps"] = {
             "api": {"name": "shared_commondataserviceforapps"}, "runtimeSource": "embedded",
             "connection": {"connectionReferenceLogicalName": f"{schema_name}.shared_commondataserviceforapps"}}
+    if file_inputs:
+        refs[FILES_API] = {"api": {"name": FILES_API}, "runtimeSource": "embedded",
+                           "connection": {"connectionReferenceLogicalName": f"{schema_name}.{FILES_API}"}}
+    flow_parameters = {"$connections": {"defaultValue": {}, "type": "Object"},
+                       "$authentication": {"defaultValue": {}, "type": "SecureObject"}}
+    for v in settings.values():
+        flow_parameters[v["parameter"]] = {"defaultValue": v["defaultValue"], "type": "String",
+                                           "metadata": {"schemaName": v["schemaName"], "description": v["description"]}}
     return _within_limits({"properties": {"connectionReferences": refs, "definition": {
         "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
         "contentVersion": "1.0.0.0",
-        "parameters": {"$connections": {"defaultValue": {}, "type": "Object"},
-                       "$authentication": {"defaultValue": {}, "type": "SecureObject"}},
+        "parameters": flow_parameters,
         "triggers": {"manual": {"type": "Request", "kind": "Skills", "inputs": {"schema": {
             "type": "object", "properties": props, "required": list(spec.get("required", []))}}}},
         "actions": actions, "outputs": {}}, "templateName": ""}, "schemaVersion": "1.0.0.0"})

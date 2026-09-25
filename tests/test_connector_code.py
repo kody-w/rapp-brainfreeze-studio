@@ -208,7 +208,111 @@ class ForumTests(unittest.TestCase):
             self.assertFalse(r["parity"])
 
 
+JSON_DOCTOR = Path(STORE, "apps", "@rapp", "json_doctor", "singleton", "json_doctor_agent.py") if STORE else None
+
+
+@unittest.skipUnless(HAVE_DOTNET and JSON_DOCTOR and JSON_DOCTOR.is_file(),
+                     "needs dotnet and a RAPP_Store checkout (BFS_RAPP_STORE)")
+class JsonDoctorTests(unittest.TestCase):
+    """A files agent: its flow reads the files a call names from SharePoint; the proof gives both sides the same
+    bytes (the Python finds them in its working folder, the C# in the request's files)."""
+
+    def setUp(self):
+        self.spec = json.loads((ROOT / "translations" / "json_doctor.json").read_text())
+
+    def prove(self, spec, script=ROOT / "translations" / "json_doctor.csx"):
+        return cc.prove(spec, JSON_DOCTOR, ROOT / "brainfreeze_studio" / "basic_agent.py", script, python=python311(),
+                        records=True)
+
+    def test_the_port_matches_the_python_on_every_file(self):
+        r = self.prove(self.spec)
+        self.assertTrue(r["parity"], json.dumps(r["mismatches"][:2])[:2000])
+        self.assertEqual(r["cases"], 60)
+        out = {json.dumps(x["args"], sort_keys=True): json.loads(x["python"]["output"]) for x in r["records"]}
+
+        def answer(**args):
+            return out[json.dumps(args, sort_keys=True)]
+        users = answer(action="inspect", path="data/users.json")          # it read the file: its shape and size
+        self.assertEqual((users["records"], users["bytes"]), (40, 6460))
+        self.assertEqual(users["fields"]["legacy"]["coverage"], "12%")     # 5 of 40: Python rounds half to even
+        self.assertEqual(answer(action="inspect", path="data/events_crlf.jsonl")["records"], 3)
+        self.assertEqual(answer(action="validate", path="data/broken.json")["error"],
+                         "Expecting value: line 3 column 21 (char 42)")
+        self.assertTrue(answer(action="validate", path="data/bom.json")["error"].startswith("Unexpected UTF-8 BOM"))
+        self.assertEqual(answer(action="inspect", path="data/missing.json")["message"], "file not found: data/missing.json")
+
+    def test_a_wrong_port_fails_the_gate(self):
+        script = (ROOT / "translations" / "json_doctor.csx").read_text()
+        self.assertIn('"file not found: "', script)
+        tmp = Path(tempfile.mkdtemp(prefix="bfs-jd-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "wrong.csx").write_text(script.replace('"file not found: "', '"no such file: "'))
+        self.assertFalse(self.prove(self.spec, tmp / "wrong.csx")["parity"])
+
+
 class FlowTests(unittest.TestCase):
+    FILES_SPEC = {"agent": "JsonDoctor", "flow_name": "JsonDoctorFlow", "description": "Reads a file.",
+                  "inputs": {"action": {"type": "string"}, "path": {"type": "string"}, "other": {"type": "string"}},
+                  "required": ["action", "path"], "file_inputs": ["path", "other"],
+                  "fixtures": {"data/a.json": {"text": "[1]"}, "b.json": {"base64": "77u/e30="}, "empty.json": {"text": ""}}}
+
+    def files_flow(self, **home):
+        return cc.compile_flow(self.FILES_SPEC, "rapp_JsonDoctor", "JSON Doctor", "JSONDoctor JsonDoctor code",
+                               "shared_rapp_code_x", files_home=home or None)
+
+    def test_a_files_flow_reads_each_named_file_from_sharepoint_and_hands_them_to_the_code(self):
+        flow = self.files_flow(site="https://contoso.sharepoint.com/sites/team")
+        d = flow["properties"]["definition"]
+        self.assertEqual(list(d["actions"]), ["Read_file_path", "Read_file_other", "Run_the_agent", "Respond_to_agent"])
+        get = d["actions"]["Read_file_path"]["actions"]["Get_file_path"]["inputs"]
+        self.assertEqual(get["host"]["operationId"], "GetFileContentByPath")
+        self.assertIs(get["parameters"]["inferContentType"], False)          # the bytes, never a parsed body
+        self.assertEqual(get["parameters"]["dataset"], "@parameters('RAPP Files Site (rapp_RappFilesSite)')")
+        # a file that isn't there fails its read; the flow still runs the code, which says so
+        self.assertEqual(d["actions"]["Read_file_other"]["runAfter"], {"Read_file_path": ["Succeeded", "Failed", "TimedOut"]})
+        self.assertEqual(d["actions"]["Run_the_agent"]["runAfter"], {"Read_file_other": ["Succeeded", "Failed", "TimedOut"]})
+        sent = d["actions"]["Run_the_agent"]["inputs"]["parameters"]["body/files"]
+        self.assertEqual(sorted(sent), ["other", "path"])                   # fixed keys: a path can't be one
+        self.assertEqual(sent["path"]["path"], "@triggerBody()?['path']")
+        self.assertNotIn("setProperty", json.dumps(flow))
+        site = d["parameters"]["RAPP Files Site (rapp_RappFilesSite)"]
+        folder = d["parameters"]["RAPP Files Folder (rapp_RappFilesFolder)"]
+        self.assertEqual((site["defaultValue"], site["metadata"]["schemaName"]),
+                         ("https://contoso.sharepoint.com/sites/team", "rapp_RappFilesSite"))
+        self.assertEqual(folder["defaultValue"], "/Shared Documents")
+        self.assertEqual(flow["properties"]["connectionReferences"]["shared_sharepointonline"]["connection"],
+                         {"connectionReferenceLogicalName": "rapp_JsonDoctor.shared_sharepointonline"})
+        body = cc.openapi(self.FILES_SPEC, "x")["paths"]["/run"]["post"]["parameters"][0]["schema"]["properties"]
+        self.assertIn("files", body)
+        self.assertNotIn("files", cc.openapi(SPEC, "x")["paths"]["/run"]["post"]["parameters"][0]["schema"]["properties"])
+        self.assertNotIn("shared_sharepointonline", cc.compile_flow(SPEC, "rapp_T", "T", "T code", "x")["properties"]
+                         ["connectionReferences"])
+
+    def test_the_flows_own_expressions_hand_the_code_what_the_proof_hands_it(self):
+        from codeapp_harness import files_sent
+        flow = self.files_flow()
+        library = {k: cc.fixture_bytes(v) for k, v in self.FILES_SPEC["fixtures"].items()}
+        cases = [{"action": "a", "path": "data/a.json"}, {"action": "a", "path": "b.json", "other": "data/a.json"},
+                 {"action": "a", "path": "missing.json"}, {"action": "a", "path": ""}, {"action": "a"},
+                 {"action": "a", "path": "data/a.json", "other": "data/a.json"},
+                 {"action": "a", "path": "../data/a.json"}, {"action": "a", "path": "/data/a.json"},
+                 {"action": "a", "path": "data/../data/a.json"}, {"action": "a", "path": "\\data\\a.json"},
+                 {"action": "a", "path": "empty.json"}]
+        for args in cases:
+            self.assertEqual(files_sent(flow, args, library), cc.files_body(self.FILES_SPEC, args), args)
+        self.assertEqual(cc.files_body(self.FILES_SPEC, cases[1]), {"path": {"path": "b.json", "content": "77u/e30="},
+                                                                   "other": {"path": "data/a.json", "content": "WzFd"}})
+        self.assertEqual(cc.files_body(self.FILES_SPEC, cases[2])["path"], {"path": "missing.json", "content": None})
+        self.assertEqual(cc.files_body(self.FILES_SPEC, cases[-1])["path"], {"path": "empty.json", "content": ""})
+        self.assertEqual(cc.files_body(self.FILES_SPEC, cases[4]), {"path": {"path": None, "content": None},
+                                                                   "other": {"path": None, "content": None}})
+
+    def test_only_paths_inside_the_folder_are_read(self):
+        for path, inside in [("data/a.json", True), ("a.json", True), ("x/./a.json", True), ("..a.json", True),
+                             ("../a.json", False), ("/a.json", False), ("x/../../a.json", False),
+                             ("\\srv\\a.json", False), ("x\\..\\a.json", False)]:
+            self.assertEqual(cc.library_path(path), inside, path)
+
     def test_the_flow_reads_runs_and_saves_the_workspace(self):
         flow = cc.compile_flow(SPEC, "rapp_Thoughtbox", "Thoughtbox", "Thoughtbox Thoughtbox code", "shared_rapp_code_x")
         d = flow["properties"]["definition"]

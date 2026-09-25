@@ -27,6 +27,48 @@ def build_test_host(outfile):
     return codeapp.build_host(outfile=outfile, sdk_alias=str(FAKE_SDK), log=lambda *a: None)
 
 
+def condition(expr, ctx):
+    """A flow If's expression ({"and": [{"not": {"equals": [a, b]}}, ...]}), evaluated as Power Automate does."""
+    (op, arg), = expr.items()
+    if op in ("and", "or"):
+        values = [condition(x, ctx) for x in arg]
+        return all(values) if op == "and" else any(values)
+    if op == "not":
+        return not condition(arg, ctx)
+    return flows.FUNCTIONS[op](*(flows.evaluate(x, ctx) for x in arg))
+
+
+def files_sent(flow, given, library):
+    """What a files flow hands its code: each Read_file_<input> If runs its guard and, when it holds, reads the path
+    from the SharePoint folder (library: {path in the folder: bytes}); then Run_the_agent's files member is evaluated.
+    Everything is the flow's own expressions; only SharePoint is a stand-in."""
+    import base64
+    d = flow["properties"]["definition"]
+    params = {k: v.get("defaultValue") for k, v in d["parameters"].items()}
+    folder = next(v for k, v in params.items() if "Files Folder" in k)
+    sharepoint = {f"{folder}/{rel}": data for rel, data in library.items()}
+    ctx = {"trigger": dict(given), "outputs": {}, "parameters": params, "actions": {}}
+    for name, action in d["actions"].items():
+        if name.startswith("Read_file_"):
+            (get_name, get), = action["actions"].items()
+            if not condition(action["expression"], ctx):
+                ctx["actions"][get_name] = {"status": "Skipped"}
+                continue
+            path = flows.evaluate(get["inputs"]["parameters"]["path"], ctx)
+            if path in sharepoint and not sharepoint[path]:    # an empty file comes back with no body (seen live)
+                ctx["actions"][get_name] = {"status": "Succeeded", "outputs": {"statusCode": 200,
+                                                                               "headers": {"Content-Length": "0"}}}
+            elif path in sharepoint:
+                ctx["actions"][get_name] = {"status": "Succeeded", "outputs": {"body": {
+                    "$content-type": "application/octet-stream",
+                    "$content": base64.b64encode(sharepoint[path]).decode()}}}
+            else:
+                ctx["actions"][get_name] = {"status": "Failed", "outputs": {"body": {"status": 404,
+                                                                                    "message": "File not found"}}}
+    sent = d["actions"]["Run_the_agent"]["inputs"]["parameters"]["body/files"]
+    return {k: {kk: flows.evaluate(vv, ctx) for kk, vv in entry.items()} for k, entry in sent.items()}
+
+
 class Player:
     def __init__(self, dist, flow_definitions=None, copilot=None, csp=codeapp.DEFAULT_CSP, connector_code=None):
         self.dist = Path(dist)
@@ -39,6 +81,8 @@ class Player:
         # as the flow keeps them in Dataverse notes
         self.connector_code = dict(connector_code or {})
         self.notes = {}
+        # the SharePoint folder those flows read the files a call names from: {path: bytes}
+        self.library = {}
 
     def _sdk(self, request):
         kind, payload = request.get("kind"), request.get("payload") or {}
@@ -74,10 +118,13 @@ class Player:
         import time
         import uuid
         from brainfreeze_studio import connector_code
-        run = flow["properties"]["definition"]["actions"]["Run_the_agent"]["inputs"]["parameters"]
+        actions = flow["properties"]["definition"]["actions"]
+        run = actions["Run_the_agent"]["inputs"]["parameters"]
         files = list(run["body/state"])
         body = {"args": {k: given.get(k) for k in run["body/args"]}, "state": {f: self.notes.get(f) for f in files},
                 "now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "id": str(uuid.uuid4())}
+        if "body/files" in run:
+            body["files"] = files_sent(flow, given, self.library)
         raw = connector_code.run_script(dll, [{"operationId": "Run", "body": body}])[0]
         reply = json.loads(raw["body"])
         self.notes.update(reply.get("state") or {})

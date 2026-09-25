@@ -18,8 +18,9 @@ and no az.
     POST /api/signin/environment  {environment, refreshToken} -> a token for that environment + the user's rights
     POST /api/deploy              Bearer <user token>, {environment, name, egg | eggUrl, ...} -> summary + log
     POST /api/jobs                the same, run in the background (any size): -> 202 {job}
-                                  or {environment, rapplication: "@publisher/id", refreshToken}: a RAPP
-                                  Store rapplication, as a Copilot Studio agent plus a Power Apps code app
+                                  or {environment, rapplication: "@publisher/id", refreshToken, filesSite?,
+                                  filesFolder?}: a RAPP Store rapplication, as a Copilot Studio agent plus a Power
+                                  Apps code app (filesSite/filesFolder: where agents that read files find them)
     GET  /api/jobs/{job}          Bearer <user token> -> the job's state, log and result (its owner only)
     GET  /api/rapplications       the RAPP Store catalog: what /api/jobs can deploy
 
@@ -29,7 +30,9 @@ through /api/jobs: a queue trigger runs it for up to an hour (see jobs.py).
 A rapplication's code app is published with the user's own token for the Power Apps service, which the job gets with
 their refresh token. That needs the user's consent to PowerApps Service's `User` permission for this app
 registration; until they give it, the job deploys the agent and its flows and says the app is waiting, and
-POST /api/signin {purpose: "powerapps"} starts the sign-in that asks for it.
+POST /api/signin {purpose: "powerapps"} starts the sign-in that asks for it. An agent that reads files reads them
+from SharePoint through a connection of the user's own: one they have, or one the job makes with their sign-in
+when the app registration may get them an API Hub token (https://apihub.azure.com).
 """
 import base64
 import json
@@ -320,6 +323,16 @@ def _queue_rapplication(body, ref, name, environment, token, account, owner, que
     for key in ("schemaName", "publisherPrefix", "translations"):
         if body.get(key):
             request[key] = body[key]
+    if body.get("filesSite"):
+        # where its file-reading agents find their files: a SharePoint site (default: the environment's, else the
+        # tenant's root site), and a folder in it (default /Shared Documents)
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+\.sharepoint\.(com|us|cn|de)(/[^\s?#]*)?", str(body["filesSite"])):
+            raise ValueError("filesSite must be a SharePoint site address: https://<tenant>.sharepoint.com/sites/<site>")
+        request["files_site"] = str(body["filesSite"]).rstrip("/")
+    if body.get("filesFolder"):
+        if not str(body["filesFolder"]).startswith("/") or ".." in str(body["filesFolder"]):
+            raise ValueError("filesFolder must be a folder path in the site, for example /Shared Documents/RAPP")
+        request["files_folder"] = str(body["filesFolder"]).rstrip("/")
     if request.get("translations") and not TRANSLATIONS:
         raise ValueError(TRANSLATIONS_OFF)
     if body.get("powerAppsToken"):

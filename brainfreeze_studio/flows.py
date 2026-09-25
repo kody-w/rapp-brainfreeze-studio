@@ -189,6 +189,15 @@ def _substring(text, start, length=None):
     return text[start:] if length is None else text[start:start + int(length)]
 
 
+def _set_property(obj, key, value):
+    """setProperty(), with its runtime's checks: an object to set on, and a name without '.', '[' or ']'."""
+    if not isinstance(obj, dict):
+        raise StudioBuildError(f"setProperty expects an object; got {type(obj).__name__}")
+    if any(c in _str(key) for c in ".[]"):
+        raise StudioBuildError(f"setProperty: the property name {key!r} can't contain '.', '[' or ']'")
+    return {**obj, _str(key): value}
+
+
 FUNCTIONS = {
     "concat": lambda *a: "".join(_str(x) for x in a),
     "createArray": lambda *a: list(a),
@@ -212,6 +221,9 @@ FUNCTIONS = {
     "toUpper": lambda s: _str(s).upper(), "toLower": lambda s: _str(s).lower(), "trim": lambda s: _str(s).strip(),
     "empty": lambda v: v in (None, "", [], {}), "coalesce": lambda *a: next((x for x in a if x is not None), None),
     "formatNumber": lambda v, f, loc="en-US": _format_number(v, f, loc),
+    "json": lambda v: json.loads(v) if isinstance(v, str) else v,
+    "setProperty": lambda obj, key, value: _set_property(obj, key, value),
+    "startsWith": lambda text, prefix: _str(text).lower().startswith(_str(prefix).lower()),   # not case-sensitive
     "mod": lambda a, b: math.fmod(a, b) if isinstance(a, float) or isinstance(b, float) else int(math.fmod(a, b)),
 }
 
@@ -296,6 +308,8 @@ def _eval(node, ctx):
         return ctx["outputs"][_eval(args[0], ctx)]
     if name == "parameters":
         return ctx["parameters"][_eval(args[0], ctx)]
+    if name == "actions":                          # an action's run record: its status, and outputs once it ran
+        return (ctx.get("actions") or {}).get(_eval(args[0], ctx))
     fn = FUNCTIONS.get(name)
     if fn is None:
         raise StudioBuildError(f"function {name}() is not modeled by the evaluator")
