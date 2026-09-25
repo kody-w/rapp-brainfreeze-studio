@@ -1,6 +1,7 @@
 """Connector code: agent logic ported to C# (custom connector code), proven against the agent's Python, and the flow
 and deploy steps that run it. The C# is compiled locally with the .NET SDK; those tests skip without `dotnet`. The
 Thoughtbox proof also needs a RAPP_Store checkout: BFS_RAPP_STORE=~/src/RAPP_Store."""
+import hashlib
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -248,6 +250,80 @@ class JsonDoctorTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         (tmp / "wrong.csx").write_text(script.replace('"file not found: "', '"no such file: "'))
         self.assertFalse(self.prove(self.spec, tmp / "wrong.csx")["parity"])
+
+
+BASIC_SHA = hashlib.sha256((ROOT / "brainfreeze_studio" / "basic_agent.py").read_bytes()).hexdigest()
+
+
+def connector_specs():
+    for f in sorted((ROOT / "translations").glob("*.json")):
+        if not f.name.endswith(".proof.json"):
+            spec = dict(json.loads(f.read_text()), _dir=str(f.parent))
+            if spec.get("mode") == "connector-code":
+                yield spec
+
+
+class RecordedProofTests(unittest.TestCase):
+    """A build without the .NET SDK (the Azure Function), or one that runs no agent code, lays a port only on a
+    proof recorded for its exact bytes: the agent's source, its BasicAgent, the linked script and the spec."""
+
+    def test_every_port_has_a_proof_recorded_for_its_current_bytes(self):
+        specs = list(connector_specs())
+        self.assertEqual(sorted(s["agent"] for s in specs), ["ForumAgent", "JsonDoctor", "Thoughtbox"])
+        for spec in specs:
+            script = (Path(spec["_dir"]) / spec["script"]).read_text(encoding="utf-8")
+            with self.subTest(spec["agent"]):
+                self.assertIsNotNone(cc.recorded_proof(spec, spec["source_sha256"], BASIC_SHA, script),
+                                     "the port, its spec or PyCompat changed: prove it and record it again "
+                                     "(python -m brainfreeze_studio record-proof <spec> <agent.py>)")
+
+    def test_a_proof_holds_only_for_the_bytes_it_ran(self):
+        spec = next(s for s in connector_specs() if s["agent"] == "JsonDoctor")
+        script = (Path(spec["_dir"]) / spec["script"]).read_text(encoding="utf-8")
+        self.assertEqual(cc.recorded_proof(spec, spec["source_sha256"], BASIC_SHA, script)["cases"], 60)
+        self.assertIsNone(cc.recorded_proof(spec, "0" * 64, BASIC_SHA, script))                      # other agent code
+        self.assertIsNone(cc.recorded_proof(spec, spec["source_sha256"], "1" * 64, script))           # another BasicAgent
+        self.assertIsNone(cc.recorded_proof(spec, spec["source_sha256"], BASIC_SHA, script + "\n// changed"))
+        fewer = dict(spec, sequences=[spec["sequences"][0][:3]])
+        self.assertIsNone(cc.recorded_proof(fewer, spec["source_sha256"], BASIC_SHA, script))         # another spec
+        with self.assertRaises(cc.ConnectorCodeError):
+            cc.record(spec, {"parity": False, "passed": 1, "cases": 2, "script_sha256": "x"}, "a", "b", "today")
+
+
+@unittest.skipUnless(JSON_DOCTOR and JSON_DOCTOR.is_file(), "needs a RAPP_Store checkout (BFS_RAPP_STORE)")
+class BuildWithoutProvingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="bfs-recorded-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.host = self.tmp / "host.js"
+        self.host.write_bytes(b"/* host */")
+
+    def prepare(self, where, translations, **kw):
+        return rapplication.prepare(where, self.tmp / f"out{len(list(self.tmp.iterdir()))}", store=STORE,
+                                    translations=str(translations), host_js=self.host, fetch_vendor=None, **kw)
+
+    def test_without_the_dotnet_sdk_a_port_is_laid_on_its_recorded_proof(self):
+        real = shutil.which
+        with mock.patch("shutil.which", lambda name, *a, **k: None if name == "dotnet" else real(name, *a, **k)), \
+                mock.patch.object(cc, "prove", side_effect=AssertionError("nothing is run")):
+            s = self.prepare("@rapp/json_doctor", ROOT / "translations")
+        agent = s["agent"]["agents"][0]
+        self.assertEqual(agent["as"], "agent flow + connector code (ported, parity proven)")
+        out = next(d for d in self.tmp.iterdir() if d.name.startswith("out"))
+        report = json.loads((out / "parity" / "JsonDoctorFlow.json").read_text())
+        self.assertEqual((report["cases"], report["passed"], bool(report["recorded"])), (60, 60, True))
+
+    def test_with_proofs_off_no_agent_code_runs_and_a_changed_port_is_refused(self):
+        changed = self.tmp / "translations"
+        shutil.copytree(ROOT / "translations", changed)
+        script = changed / "json_doctor.csx"
+        script.write_text(script.read_text().replace('"file not found: "', '"no such file: "'))
+        with mock.patch.object(cc, "prove", side_effect=AssertionError("nothing is run")):
+            s = self.prepare("@rapp/json_doctor", changed, run_proofs=False)
+            invoice = self.prepare(ROOT / "examples" / "rapplications" / "invoice_router", ROOT / "translations",
+                                   run_proofs=False)
+        self.assertIn("no proof was recorded for this exact code (json_doctor.proof.json)", s["agent"]["agents"][0]["note"])
+        self.assertIn("isn't allowed here", invoice["agent"]["agents"][0]["note"])
 
 
 class FlowTests(unittest.TestCase):

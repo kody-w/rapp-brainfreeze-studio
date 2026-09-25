@@ -57,6 +57,7 @@ from brainfreeze_studio.deploy import DeployError, deploy
 HERE = Path(__file__).resolve().parent
 SDK_DIR = HERE / "sdk"            # copilot-harness-sdk's tutorial/ folder, copied in by publish.sh
 HOST_JS = HERE / "codeapp-host.js"  # the code app host, built by publish.sh (npm brings Microsoft's SDK in)
+BUNDLED_TRANSLATIONS = HERE / "translations"  # the repo's proven ports, copied by publish.sh
 RAPP_REF = re.compile(r"^(?:@[A-Za-z0-9][A-Za-z0-9-]*/)?[a-z][a-z0-9_-]*$")
 CATALOG_TTL = 600
 CLIENT_ID = os.environ.get("BFS_CLIENT_ID", "")
@@ -387,7 +388,8 @@ def job_status(req: func.HttpRequest) -> func.HttpResponse:
 def run_deploy_job(msg: func.QueueMessage) -> None:
     job_id = json.loads(msg.get_body().decode("utf-8"))["job"]
     jobs.run_job(job_id, store(), bs.build, deploy, sdk_dir=SDK_DIR, client_id=CLIENT_ID, tenant=TENANT,
-                 allow_translations=TRANSLATIONS, host_js=HOST_JS if HOST_JS.is_file() else None)
+                 allow_translations=TRANSLATIONS, host_js=HOST_JS if HOST_JS.is_file() else None,
+                 bundled_translations=BUNDLED_TRANSLATIONS if BUNDLED_TRANSLATIONS.is_dir() else None)
 
 
 @app.route(route="page", methods=["GET"])

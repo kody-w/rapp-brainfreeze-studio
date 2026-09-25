@@ -59,6 +59,11 @@ def main(argv=None):
                     "environment's RAPP Files Site, else your tenant's root site)")
     ra.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
     ra.add_argument("--json", action="store_true", help="print the summary as JSON")
+    pr = sub.add_parser("record-proof", help="prove a connector-code port against its agent.py and record the proof "
+                        "beside its spec, so builds without the .NET SDK (or that run no agent code) can lay it")
+    pr.add_argument("spec", help="the port's spec, for example translations/json_doctor.json")
+    pr.add_argument("agent", help="the agent.py it ports")
+    pr.add_argument("--basic", help="the BasicAgent it runs beside (default: this package's, as rapplication builds use)")
     ch = sub.add_parser("codeapp-host", help="build the code app host once (needs node and npm)")
     ch.add_argument("--build-dir", help="default: ~/.cache/brainfreeze-studio/codeapp-host-build")
     a = p.parse_args(argv)
@@ -72,6 +77,8 @@ def main(argv=None):
         return 0
     if a.cmd == "rapplication":
         return _rapplication(a)
+    if a.cmd == "record-proof":
+        return _record_proof(a)
     if a.cmd == "serve":
         from .mcp import McpApp, host_agents, make_server
         try:
@@ -132,6 +139,32 @@ APIHUB = "https://apihub.azure.com"
 def _files_home(a):
     home = {k: v for k, v in (("site", a.files_site), ("folder", a.files_folder)) if v}
     return home or None
+
+
+def _record_proof(a):
+    import hashlib
+    from pathlib import Path
+    from . import connector_code as cc
+    from .materialize import agent_python
+    spec_file = Path(a.spec)
+    spec = json.loads(spec_file.read_text(encoding="utf-8"))
+    spec["_dir"] = str(spec_file.parent)
+    basic = Path(a.basic) if a.basic else Path(__file__).with_name("basic_agent.py")
+    source = Path(a.agent).read_bytes().decode("utf-8", errors="replace")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    if spec.get("source_sha256") and spec["source_sha256"] != digest:
+        print(f"brainfreeze-studio: the spec is for other code (sha256 {spec['source_sha256'][:12]}, "
+              f"{a.agent} has {digest[:12]})", file=sys.stderr)
+        return 1
+    try:
+        report = cc.prove(spec, a.agent, basic, spec_file.parent / spec["script"], python=agent_python(spec.get("python")))
+        rec = cc.record(spec, report, digest, hashlib.sha256(basic.read_bytes()).hexdigest(), time.strftime("%Y-%m-%d"))
+    except cc.ConnectorCodeError as e:
+        print(f"brainfreeze-studio: {e}", file=sys.stderr)
+        return 1
+    cc.proof_record_file(spec).write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+    print(f"{spec['agent']}: {report['passed']}/{report['cases']} proven; recorded in {cc.proof_record_file(spec)}")
+    return 0
 
 
 def _rapplication(a):

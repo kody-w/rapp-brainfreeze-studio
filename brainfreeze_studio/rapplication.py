@@ -299,7 +299,7 @@ def app_tools(r, agents, twin_flows):
 
 def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=None, store=STORE, translations=None,
             sdk_dir=None, environment=None, rappid=None, created_utc=None, fetch_vendor=None, host_js=None,
-            files_home=None):
+            files_home=None, run_proofs=True):
     """Everything offline, nothing deployed: the rapplication egg, the Copilot Studio workspace built from it, Power
     Apps twins of the flows the build proved, and the code app. Writes out_dir/rapplication.json and returns it.
     A rappid minted by an earlier run in the same out_dir is kept, so re-running updates the same organism."""
@@ -319,7 +319,7 @@ def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=N
     egg_path.write_bytes(egg)
     display = (name or r.name)[:42]
     built = build(str(egg_path), out, display, publisher_prefix, schema_name=schema_name, sdk_dir=sdk_dir,
-                  environment=environment, translations=translations, files_home=files_home)
+                  environment=environment, translations=translations, files_home=files_home, run_proofs=run_proofs)
     schema = built["schema_name"]
     twin_flows = twins(built["workspace"], schema, display)
     tools = app_tools(r, built["agents"], twin_flows)

@@ -5,3 +5,4 @@ sdk/
 __pycache__/
 codeapp-host.js
 codeapp-host.js.sources
+translations/

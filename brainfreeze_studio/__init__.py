@@ -283,9 +283,12 @@ def _compose_instructions(soul, sdk_dir, routing, agent_names, generic, display_
 
 # ── connector code: an agent's logic ported to C#, proven, run by a flow that keeps its state ─────────────────
 
-def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars, files_home=None):
+def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars, files_home=None,
+                        run_proofs=True):
     """Prove a connector-code port (connector_code.prove) and, when it holds, lay the connector, its flow and the tool.
-    Returns whether the agent became live; a refused port leaves a note and the agent falls back."""
+    Without the .NET SDK, or with run_proofs off (no agent code may run here), only a proof recorded for these exact
+    bytes lays it. Returns whether the agent became live; a refused port leaves a note and the agent falls back."""
+    import shutil
     import tempfile
     from . import connector_code as cc
     from .flows import tool_yaml
@@ -300,15 +303,24 @@ def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_
         a["note"] = "a connector-code proof needs the egg's agents/basic_agent.py"
         return False
     script_path = Path(spec["_dir"]) / spec["script"]
-    with tempfile.TemporaryDirectory() as tmp:
-        agent_file, basic_file = Path(tmp) / Path(a["file"]).name, Path(tmp) / "basic_agent.py"
-        agent_file.write_text(a["source"])
-        basic_file.write_bytes(basic)
-        try:
-            report = cc.prove(spec, agent_file, basic_file, script_path, python=agent_python(spec.get("python")))
-        except cc.ConnectorCodeError as e:
-            a["note"] = f"connector code not proven: {e}"
+    if not run_proofs or shutil.which("dotnet") is None:
+        report = cc.recorded_proof(spec, digest, hashlib.sha256(basic).hexdigest(),
+                                   script_path.read_text(encoding="utf-8"))
+        if report is None:
+            a["note"] = ("connector code is proven by running it, which " + ("isn't allowed here" if not run_proofs
+                         else "needs the .NET SDK") + f", and no proof was recorded for this exact code "
+                         f"({cc.proof_record_file(spec).name})")
             return False
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_file, basic_file = Path(tmp) / Path(a["file"]).name, Path(tmp) / "basic_agent.py"
+            agent_file.write_text(a["source"])
+            basic_file.write_bytes(basic)
+            try:
+                report = cc.prove(spec, agent_file, basic_file, script_path, python=agent_python(spec.get("python")))
+            except cc.ConnectorCodeError as e:
+                a["note"] = f"connector code not proven: {e}"
+                return False
     proofs[a["contract"]["name"]] = report
     (out / "parity").mkdir(parents=True, exist_ok=True)
     (out / "parity" / f"{spec['flow_name']}.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -394,9 +406,10 @@ def _proof(schema_name, session_manifest):
 
 def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, environment=None,
           session=None, model="Sonnet46", hn_api_name=None, language=1033, mcp_connector_id=None,
-          mcp_host=None, translations=None, files_home=None):
+          mcp_host=None, translations=None, files_home=None, run_proofs=True):
     """Egg in, harness workspace out. Returns a summary dict; writes <out_dir>/workspace and sidecars. files_home
-    ({"site", "folder"}) is where agents that read files find them (a SharePoint site and folder)."""
+    ({"site", "folder"}) is where agents that read files find them (a SharePoint site and folder). With run_proofs
+    off, no agent code runs: only connector-code ports with a proof recorded for their exact bytes are laid."""
     if not name or len(name) > MAX_DISPLAY_NAME:
         raise StudioBuildError(f"name must be 1-{MAX_DISPLAY_NAME} characters (longer names never finish provisioning)")
     if not re.fullmatch(r"[a-z][a-z0-9]{1,7}", publisher_prefix or ""):
@@ -475,6 +488,8 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
     specs = {}
     if translations:
         for f in sorted(Path(translations).expanduser().glob("*.json")):
+            if f.name.endswith(".proof.json"):             # a recorded proof, read beside its spec
+                continue
             spec = json.loads(f.read_text())
             spec["_dir"] = str(f.parent)
             specs[spec["agent"]] = spec
@@ -490,9 +505,13 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
             if a["profile"] or not spec:
                 continue
             if spec.get("mode") == "connector-code":
-                if _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars, files_home):
+                if _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_vars, files_home,
+                                       run_proofs):
                     live.append(a["contract"]["name"])
                     routing.append(f"code:{spec['flow_name']}")
+                continue
+            if not run_proofs:
+                a["note"] = "its translation is proven by running the agent's code, which isn't allowed here"
                 continue
             materialized = spec.get("mode") == "materialized"
             if materialized:

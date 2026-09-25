@@ -1,0 +1,12 @@
+{
+  "agent": "ForumAgent",
+  "source_sha256": "b5a98826f4698b0082dc1c5164af0ed4441f64be9bd2571b505f859ce8a08f04",
+  "basic_sha256": "701488bc00d536a7b23295e7da99c62f24e9b00f233daa325886430c736b78eb",
+  "script_sha256": "f503186f9b19fb2f7b88a5a5e9a6e90d898de98b709b5ad79ad1f340c9b0628b",
+  "spec_sha256": "b10de204abd2d703830e299a6875f2ed09baa0d6e7a75d1ceaa8755ae66b3bae",
+  "python": "3.11",
+  "cases": 29,
+  "passed": 29,
+  "parity": true,
+  "proven": "2026-09-25"
+}

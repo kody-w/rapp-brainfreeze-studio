@@ -453,6 +453,44 @@ def prove(spec, agent_file, basic_file, script_file, python=None, records=False)
     return proof
 
 
+# ── recorded proofs: for places without the .NET SDK (the Azure Function) ─────────────────────────────────────────
+
+def spec_sha256(spec):
+    """The spec as its proof ran it (calls, fixtures, recorded responses), without the build's own fields."""
+    body = {k: v for k, v in spec.items() if not k.startswith("_")}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def proof_record_file(spec):
+    return Path(spec["_dir"]) / (Path(spec["script"]).stem + ".proof.json")
+
+
+def record(spec, report, source_sha256, basic_sha256, when):
+    """What a passing proof leaves behind: the exact bytes it held for (the agent's source, its BasicAgent, the
+    linked script, the spec) and its count, so a build without the .NET SDK can lay the port without rerunning it."""
+    if not report["parity"]:
+        raise ConnectorCodeError(f"only a passing proof is recorded ({report['passed']}/{report['cases']})")
+    return {"agent": spec["agent"], "source_sha256": source_sha256, "basic_sha256": basic_sha256,
+            "script_sha256": report["script_sha256"], "spec_sha256": spec_sha256(spec), "python": spec.get("python"),
+            "cases": report["cases"], "passed": report["passed"], "parity": True, "proven": when}
+
+
+def recorded_proof(spec, source_sha256, basic_sha256, script_text):
+    """The proof recorded for these exact bytes, as a report like prove()'s (with `recorded`: its date), or None
+    when there is none or it was for other code: a changed agent, script, library or spec needs a new proof."""
+    f = proof_record_file(spec)
+    if not f.is_file():
+        return None
+    rec = json.loads(f.read_text(encoding="utf-8"))
+    script_sha = hashlib.sha256(linked(script_text).encode("utf-8")).hexdigest()
+    if not (rec.get("parity") and rec.get("source_sha256") == source_sha256 and rec.get("basic_sha256") == basic_sha256
+            and rec.get("script_sha256") == script_sha and rec.get("spec_sha256") == spec_sha256(spec)):
+        return None
+    return {"agent": spec["agent"], "mode": "connector-code", "cases": rec["cases"], "passed": rec["passed"],
+            "parity": True, "sequences": len(spec["sequences"]), "mismatches": [], "script_sha256": script_sha,
+            "recorded": rec["proven"]}
+
+
 # ── what a proven port becomes: a custom connector, and the flow that runs it with the agent's state ─────────────
 
 STATE_PREFIX = "rapp-workspace"

@@ -352,6 +352,15 @@ class JobTests(unittest.TestCase):
         self.assertIn("  ! calls eval()", status["log"])
         self.assertIsNone(self.store.get(f"{job}/request.json"))           # both tokens leave with the request
 
+    def test_bundled_ports_are_used_and_run_nothing_unless_translations_are_allowed(self):
+        job = self.queue({"rapplication": "@x/y", "powerapps_token": token(aud="https://service.powerapps.com/")})
+        self.execute(job, rapplications=self.rapp_module(), bundled_translations=Path("/bundle"))
+        self.assertEqual((self.calls[0][2]["translations"], self.calls[0][2]["run_proofs"]), ("/bundle", False))
+        self.calls.clear()
+        job = self.queue({"rapplication": "@x/y", "powerapps_token": token(aud="https://service.powerapps.com/")})
+        self.execute(job, rapplications=self.rapp_module(), bundled_translations=Path("/bundle"), allow_translations=True)
+        self.assertEqual((self.calls[0][2]["translations"], self.calls[0][2]["run_proofs"]), ("/bundle", True))
+
     def test_without_consent_the_agent_deploys_and_the_app_waits(self):
         def refuse(req, timeout=None):
             raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(json.dumps(

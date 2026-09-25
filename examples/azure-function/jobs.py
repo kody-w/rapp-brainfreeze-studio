@@ -183,9 +183,12 @@ def reads_files(out):
 
 
 def run_job(job_id, store, build, deploy, *, sdk_dir, client_id=None, tenant="organizations",
-            allow_translations=False, flush_every=3.0, host_js=None, rapplications=None, opener=None):
+            allow_translations=False, flush_every=3.0, host_js=None, rapplications=None, opener=None,
+            bundled_translations=None):
     """Run one queued job end to end. Never raises: the outcome is written to the job's status. A request with a
-    `rapplication` deploys its agent, its flows and its code app (brainfreeze_studio.rapplication)."""
+    `rapplication` deploys its agent, its flows and its code app (brainfreeze_studio.rapplication). With no
+    translations of its own, it uses the bundled ones: proofs that run the agent's code only when translations are
+    allowed, and otherwise just the connector-code ports whose proofs were recorded for their exact bytes."""
     status = store.get(f"{job_id}/status.json") or {"job": job_id, "log": []}
     log = status.setdefault("log", [])
     last = [0.0]
@@ -227,13 +230,15 @@ def run_job(job_id, store, build, deploy, *, sdk_dir, client_id=None, tenant="or
                 tdir.mkdir()
                 for i, spec in enumerate(request["translations"]):
                     (tdir / f"{i:03d}.json").write_text(json.dumps(spec))
+            if tdir is None and bundled_translations:
+                tdir = bundled_translations
             say(f"preparing {request['rapplication']}: its agent, the flows its app calls, and the app")
             summary = rapplications.prepare(request["rapplication"], work / "out", name=request.get("displayName") or None,
                                             publisher_prefix=request.get("publisherPrefix") or "rapp",
                                             schema_name=request.get("schemaName") or None,
                                             store=request.get("store") or rapplications.STORE, sdk_dir=str(sdk_dir),
                                             environment=environment, translations=str(tdir) if tdir else None,
-                                            host_js=host_js)
+                                            host_js=host_js, run_proofs=allow_translations)
             warnings = ((summary.get("codeapp") or {}).get("report") or {}).get("risks") or []
             say(f"prepared {summary['agent']['schemaName']} in {time.time() - started:.0f}s: "
                 f"{len(summary['tools'])} tool(s), {len(summary['powerapps_flows'])} flow(s) for the app"
@@ -241,10 +246,12 @@ def run_job(job_id, store, build, deploy, *, sdk_dir, client_id=None, tenant="or
             for w in warnings:
                 say(f"  ! {w}")
             pa_token, why_not = (None, None)
-            if summary.get("codeapp"):
+            code = (work / "out" / "workspace" / "connectors").is_dir()     # connector code: its connection needs it
+            if summary.get("codeapp") or code:
                 pa_token, why_not = powerapps_token(request, client_id, tenant, opener)
                 if why_not:
-                    say(f"the code app waits: {why_not}")
+                    say(f"the code app waits: {why_not}" if summary.get("codeapp") else
+                        f"no Power Apps token for the agent's connector code: {why_not}")
             hub = None
             if reads_files(work / "out"):
                 hub = apihub_token(request, client_id, tenant, opener)
