@@ -122,11 +122,12 @@ egg's code there, need a list of the tenants it serves.
 
 ## How close is it?
 
-[MAPPING.md](MAPPING.md) maps every brainstem and agent.py concept to its Copilot Studio harness counterpart,
-with a status and evidence per row. Today: **21 of 33** proven or built, 5 approximated, 7 gaps. The translated
-InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the half-cent midpoint, and
-so have the materialized AIBAST flows.
-Next: connector translations for API-calling agents.
+[MAPPING.md](MAPPING.md) maps every brainstem, agent.py and rapplication concept to its Copilot Studio and Power
+Platform counterpart, with a status and evidence per row. Today: **21 of 43** proven or built, 6 approximated,
+16 gaps. The translated InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the
+half-cent midpoint, and so have the materialized AIBAST flows.
+Next: connector, state and file translations (custom connectors, Dataverse notes, SharePoint), then rapplications:
+a RAPP Store agent with its UI, as a Copilot Studio agent plus a Power Apps code app.
 
 ## Tests
 
