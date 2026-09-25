@@ -54,6 +54,50 @@ def who_am_i(accepted, calls):
     return opener
 
 
+USER_ID = "00000000-0000-0000-0000-0000000000aa"
+DISCOVERY_ROWS = [
+    {"FriendlyName": "zeta", "Url": "https://zeta.crm4.dynamics.com", "State": 0, "OrganizationType": 5,
+     "EnvironmentId": "e-z", "Region": "EMEA"},
+    {"FriendlyName": "Alpha (default)", "Url": "https://alpha.crm.dynamics.com", "State": 0, "OrganizationType": 12,
+     "EnvironmentId": "e-a", "Region": "NA"},
+    {"FriendlyName": "Disabled", "Url": "https://off.crm.dynamics.com", "State": 1, "OrganizationType": 5},
+    {"FriendlyName": "Elsewhere", "Url": "https://gov.crm.microsoftdynamics.us", "State": 0, "OrganizationType": 0},
+    {"FriendlyName": "beta", "Url": "https://beta.crm.dynamics.com/", "State": 0, "OrganizationType": 99},
+]
+
+
+class FakeCloud:
+    """Microsoft sign-in, Global Discovery and Dataverse, as one urlopen."""
+
+    def __init__(self, lacking=(), absent=(), refuse_refresh=False, discovery_status=200, rights_status=200):
+        self.lacking, self.absent, self.rights_status = set(lacking), set(absent), rights_status
+        self.refuse_refresh, self.discovery_status = refuse_refresh, discovery_status
+        self.requests = []
+
+    def __call__(self, req, timeout=None):
+        url = req.full_url
+        self.requests.append((req.get_method(), url, req.get_header("Authorization"),
+                              req.data.decode() if req.data else None))
+        fail = lambda code, body=b"{}": urllib.error.HTTPError(url, code, "no", {}, io.BytesIO(body))
+        if url.startswith("https://login.microsoftonline.com/"):
+            if self.refuse_refresh:
+                raise fail(400, json.dumps({"error": "invalid_grant", "error_description":
+                                            "AADSTS70000: The refresh token was revoked. Trace ID: abc"}).encode())
+            return Resp(json.dumps({"access_token": token(), "refresh_token": "rt-2"}).encode())
+        if url.startswith("https://globaldisco.crm.dynamics.com/"):
+            if self.discovery_status != 200:
+                raise fail(self.discovery_status)
+            return Resp(json.dumps({"value": DISCOVERY_ROWS}).encode())
+        if url.endswith("/WhoAmI"):
+            return Resp(json.dumps({"UserId": USER_ID}).encode())
+        privilege = url.split("PrivilegeName='")[1].rstrip("')")
+        if self.rights_status != 200:
+            raise fail(self.rights_status)
+        if privilege in self.absent:
+            raise fail(400)
+        return Resp(json.dumps({"RolePrivileges": [] if privilege in self.lacking else [{"Depth": "Global"}]}).encode())
+
+
 class FakeStore:
     def __init__(self):
         self.docs, self.writes = {}, 0
@@ -104,6 +148,53 @@ class VerifierTests(unittest.TestCase):
         self.assertEqual(calls, [])
         verify(token(tid="tenant-1"), ENV)
         self.assertEqual(len(calls), 1)
+
+
+class EnvironmentTests(unittest.TestCase):
+    def test_the_users_environments_come_from_global_discovery(self):
+        cloud = FakeCloud()
+        found = auth.Verifier(opener=cloud).environments(token(aud=auth.DISCOVERY))
+        self.assertEqual([(e["name"], e["url"], e["kind"]) for e in found], [
+            ("Alpha (default)", "https://alpha.crm.dynamics.com/", "Default"),
+            ("beta", "https://beta.crm.dynamics.com/", ""),
+            ("zeta", "https://zeta.crm4.dynamics.com/", "Sandbox")])
+        self.assertEqual(found[2]["region"], "EMEA")
+        method, url, header, _ = cloud.requests[0]
+        self.assertEqual((method, url), ("GET", "https://globaldisco.crm.dynamics.com/api/discovery/v2.0/Instances"))
+        self.assertTrue(header.startswith("Bearer "))
+
+    def test_only_a_discovery_token_from_an_allowed_tenant_is_sent_there(self):
+        cloud = FakeCloud()
+        verify = auth.Verifier(["tenant-1"], opener=cloud)
+        for bad in (token(), token(aud=auth.DISCOVERY, tid="tenant-2"), token(aud=auth.DISCOVERY, scp=""), ""):
+            with self.assertRaises(PermissionError):
+                verify.environments(bad)
+        self.assertEqual(cloud.requests, [])
+
+    def test_discovery_refusing_the_sign_in_asks_for_a_new_one(self):
+        with self.assertRaises(PermissionError) as e:
+            auth.Verifier(opener=FakeCloud(discovery_status=401)).environments(token(aud=auth.DISCOVERY))
+        self.assertIn("sign in again", str(e.exception))
+        with self.assertRaises(RuntimeError):
+            auth.Verifier(opener=FakeCloud(discovery_status=503)).environments(token(aud=auth.DISCOVERY))
+
+    def test_missing_rights_name_what_a_deploy_could_not_create(self):
+        verify = auth.Verifier(opener=FakeCloud())
+        self.assertEqual(verify.missing_rights(token(), ENV, USER_ID), [])
+        cloud = FakeCloud(lacking={"prvCreatebot", "prvCreateWorkflow"}, absent={"prvCreateEnvironmentVariableDefinition"})
+        self.assertEqual(auth.Verifier(opener=cloud).missing_rights(token(), ENV, USER_ID), ["agents", "flows"])
+        self.assertEqual(len(cloud.requests), len(auth.MAKER_RIGHTS))
+        self.assertIn(f"systemusers({USER_ID})/Microsoft.Dynamics.CRM.RetrieveUserPrivilegeByPrivilegeName"
+                      "(PrivilegeName='prvCreatebot')", " ".join(r[1] for r in cloud.requests))
+        with self.assertRaises(RuntimeError):
+            verify.missing_rights(token(), ENV, "') or 1 eq 1 or ('")
+
+    def test_a_refused_refresh_says_why_without_the_trace(self):
+        user = auth.UserToken(None, ENV, "rt-1", client_id="app", opener=FakeCloud(refuse_refresh=True))
+        with self.assertRaises(PermissionError) as e:
+            user()
+        self.assertEqual(str(e.exception), "could not refresh your sign-in; sign in again "
+                                           "(AADSTS70000: The refresh token was revoked.)")
 
 
 class JobTests(unittest.TestCase):
@@ -314,6 +405,69 @@ class FunctionRouteTests(unittest.TestCase):
                 probe = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(probe)
             self.assertEqual(probe.TRANSLATIONS, on, env)
+
+    def call(self, handler, method, route, body=None, tok=None):
+        headers = {"Authorization": "Bearer " + tok} if tok else {}
+        req = func.HttpRequest(method, f"/api/{route}", headers=headers,
+                               body=b"" if body is None else json.dumps(body).encode())
+        resp = handler(req)
+        return resp.status_code, json.loads(resp.get_body())
+
+    def test_sign_in_is_for_global_discovery_unless_an_environment_is_named(self):
+        signin = self.fa.signin.build().get_user_function()
+        asked = []
+        fake = lambda url, fields: asked.append((url, fields)) or {k: "x" for k in (
+            "device_code", "user_code", "verification_uri", "expires_in", "interval", "message")}
+        with mock.patch.object(self.fa, "CLIENT_ID", "app"), mock.patch.object(self.fa, "_post_form", fake):
+            self.assertEqual(self.call(signin, "POST", "signin", {})[0], 200)
+            self.assertEqual(self.call(signin, "POST", "signin")[0], 200)
+            self.assertEqual(self.call(signin, "POST", "signin", {"environment": ENV})[0], 200)
+            status, body = self.call(signin, "POST", "signin", {"environment": "https://evil.example.com/"})
+        scopes = [fields["scope"].split()[0] for _, fields in asked]
+        self.assertEqual(scopes, [auth.DISCOVERY + "user_impersonation"] * 2 + [ENV + "user_impersonation"])
+        self.assertIn("offline_access", asked[0][1]["scope"])
+        self.assertEqual(status, 400)
+
+    def test_the_environments_route_lists_the_users_environments(self):
+        environments = self.fa.environments.build().get_user_function()
+        self.fa.verify = auth.Verifier(opener=FakeCloud())
+        status, body = self.call(environments, "GET", "environments", tok=token(aud=auth.DISCOVERY))
+        self.assertEqual((status, len(body["environments"])), (200, 3))
+        self.fa.verify = auth.Verifier(opener=FakeCloud(discovery_status=401))
+        self.assertEqual(self.call(environments, "GET", "environments", tok=token(aud=auth.DISCOVERY))[0], 401)
+        self.assertEqual(self.call(environments, "GET", "environments")[0], 401)
+
+    def test_picking_an_environment_trades_the_refresh_token_and_checks_rights(self):
+        pick = self.fa.signin_environment.build().get_user_function()
+        cloud = FakeCloud(lacking={"prvCreatebot"})
+        self.fa.verify = auth.Verifier(opener=cloud)
+        with mock.patch.object(self.fa, "CLIENT_ID", "app"), \
+                mock.patch.object(self.fa.auth.urllib.request, "urlopen", cloud):
+            status, body = self.call(pick, "POST", "signin/environment", {"environment": ENV, "refreshToken": "rt-1"})
+            self.assertEqual(status, 200, body)
+            self.assertEqual((body["environment"], body["refresh_token"]), (ENV, "rt-2"))
+            self.assertEqual(auth.claims(body["access_token"])["aud"], ENV.rstrip("/"))
+            self.assertEqual((body["canMakeAgents"], body["missing"]), (False, ["agents"]))
+            _, url, _, form = cloud.requests[0]
+            self.assertTrue(url.endswith("/oauth2/v2.0/token"))
+            self.assertIn("grant_type=refresh_token", form)
+            self.assertIn("client_id=app", form)
+            self.assertIn("scope=https%3A%2F%2Fexample.crm.dynamics.com%2Fuser_impersonation+offline_access", form)
+            self.assertEqual(self.call(pick, "POST", "signin/environment", {"environment": ENV})[0], 401)
+            self.assertEqual(self.call(pick, "POST", "signin/environment", {"environment": "https://x.example/",
+                                                                            "refreshToken": "rt-1"})[0], 400)
+        unreadable = FakeCloud(rights_status=403)
+        self.fa.verify = auth.Verifier(opener=unreadable)
+        with mock.patch.object(self.fa, "CLIENT_ID", "app"), \
+                mock.patch.object(self.fa.auth.urllib.request, "urlopen", unreadable):
+            status, body = self.call(pick, "POST", "signin/environment", {"environment": ENV, "refreshToken": "rt-1"})
+        self.assertEqual((status, body["canMakeAgents"], body["missing"]), (200, None, []))
+        refused = FakeCloud(refuse_refresh=True)
+        with mock.patch.object(self.fa, "CLIENT_ID", "app"), \
+                mock.patch.object(self.fa.auth.urllib.request, "urlopen", refused):
+            status, body = self.call(pick, "POST", "signin/environment", {"environment": ENV, "refreshToken": "old"})
+        self.assertEqual(status, 401)
+        self.assertIn("sign in again", body["error"])
 
     def test_oversized_uploads_are_refused(self):
         with mock.patch.object(self.fa, "MAX_ZIP", 8):

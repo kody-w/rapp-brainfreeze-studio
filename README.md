@@ -111,7 +111,8 @@ deploy("out/workspace", "https://yourorg.crm.dynamics.com/", get_token=lambda: u
 ```
 
 [`examples/azure-function`](examples/azure-function) runs build and deploy in an Azure Function. The user signs in
-on a small page with their own account (device code, delegated Dataverse access only), picks an egg and deploys.
+on a small page with their own account (device code, delegated Dataverse access only), picks one of their
+environments (listed by the Dataverse Global Discovery Service) and an egg, and deploys.
 The Function has no service account, and holds a user's sign-in only while their deploy runs. Deployed from a
 laptop and from the Function as the same user, one egg gave identical agents. Agents too big for one HTTP
 request, such as libraries of tens of flows, deploy as background jobs: `POST /api/jobs` returns at once, a queue

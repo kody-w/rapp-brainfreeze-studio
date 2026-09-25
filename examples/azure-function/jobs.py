@@ -28,7 +28,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from auth import claims
+from auth import UserToken
 
 CONTAINER = "bfs-deploy-jobs"
 QUEUE = "bfs-deploy-jobs"
@@ -99,45 +99,6 @@ class BlobStore:
 
     def delete(self, name):
         self._request("DELETE", name)
-
-
-class UserToken:
-    """The user's delegated Dataverse token, refreshed through the public client when it nears expiry (if the job
-    carries a refresh token). Called before every Dataverse request."""
-
-    def __init__(self, access_token, environment, refresh_token=None, client_id=None, tenant="organizations",
-                 opener=None, now=time.time):
-        self.access_token, self.refresh_token = access_token, refresh_token
-        self.environment, self.client_id, self.tenant = environment, client_id, tenant
-        self.urlopen = opener or urllib.request.urlopen
-        self.now = now
-        self.refreshed = 0
-
-    def expires(self):
-        return (claims(self.access_token) or {}).get("exp", 0)
-
-    def __call__(self):
-        if self.expires() - self.now() > 300:
-            return self.access_token
-        if not (self.refresh_token and self.client_id):
-            if self.expires() > self.now():
-                return self.access_token
-            raise PermissionError("your sign-in expired while the job ran; sign in again and rerun it (a deploy "
-                                  "picks up where it stopped)")
-        data = urllib.parse.urlencode({"grant_type": "refresh_token", "client_id": self.client_id,
-                                       "refresh_token": self.refresh_token,
-                                       "scope": f"{self.environment}user_impersonation offline_access"}).encode()
-        req = urllib.request.Request(f"https://login.microsoftonline.com/{self.tenant}/oauth2/v2.0/token", data=data,
-                                     method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
-        try:
-            with self.urlopen(req, timeout=30) as r:
-                body = json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            raise PermissionError(f"could not refresh your sign-in: {e.read().decode()[:300]}")
-        self.access_token = body["access_token"]
-        self.refresh_token = body.get("refresh_token") or self.refresh_token
-        self.refreshed += 1
-        return self.access_token
 
 
 def new_job(store, request, access_token, owner, account, refresh_token=None):

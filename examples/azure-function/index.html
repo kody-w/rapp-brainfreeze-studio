@@ -6,24 +6,38 @@
 <title>Deploy a brainstem to Copilot Studio</title>
 <style>
   body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #1b1b1b; }
+  h2 { font-size: 1.05rem; margin: 1.8rem 0 .3rem; }
   label { display: block; margin-top: .9rem; font-weight: 600; }
-  input { width: 100%; box-sizing: border-box; padding: .5rem; font: inherit; }
-  button { margin-top: 1.2rem; padding: .6rem 1.1rem; font: inherit; cursor: pointer; }
-  .code { font: 600 1.6rem ui-monospace, monospace; letter-spacing: .1em; }
+  input, select { width: 100%; box-sizing: border-box; padding: .5rem; font: inherit; }
+  button { margin-top: .8rem; padding: .6rem 1.1rem; font: inherit; cursor: pointer; }
+  .code { font: 600 1.6rem ui-monospace, monospace; letter-spacing: .1em; margin: .3rem 0; }
   pre { background: #f4f4f4; padding: .8rem; white-space: pre-wrap; font-size: 13px; }
+  pre:empty { display: none; }
   .hint { color: #555; font-size: 13px; }
+  .ok { color: #0b6a0b; }
+  .warn { color: #8a4b00; }
+  .err { color: #a4262c; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <h1>Deploy a brainstem to Copilot Studio</h1>
-<p class="hint">You sign in with your own account. The agent is created with your rights, in an environment you can
-make agents in. This page never stores your sign-in; a background deploy holds it only while it runs.</p>
+<p class="hint">Sign in with your own account, pick one of your environments, and the agent is created there with
+your rights. This page never stores your sign-in; a background deploy holds it only while it runs.</p>
 
-<label for="env">Environment URL</label>
-<input id="env" placeholder="https://yourorg.crm.dynamics.com/">
+<h2>1. Sign in</h2>
 <button id="signin">Sign in with your account</button>
 <div id="auth"></div>
 
+<h2>2. Pick an environment</h2>
+<select id="env" aria-label="Environment" disabled><option value="">Sign in first</option></select>
+<div id="other" hidden>
+  <input id="envUrl" aria-label="Environment URL" placeholder="https://yourorg.crm.dynamics.com/">
+  <button id="useUrl">Use this environment</button>
+</div>
+<p id="envStatus" class="hint"></p>
+
+<h2>3. Deploy</h2>
 <label for="name">Agent name</label>
 <input id="name" placeholder="My Desk">
 <label for="egg">Brainstem egg (.egg)</label>
@@ -34,59 +48,142 @@ make agents in. This page never stores your sign-in; a background deploy holds i
 <pre id="out"></pre>
 
 <script>
-let token = null, refreshToken = null;
+// The sign-in lives in memory only: a token for Global Discovery (to list environments), the refresh token, and the
+// token for the environment picked.
+const s = { discovery: null, refresh: null, env: null, token: null, pick: 0 };
 const $ = (id) => document.getElementById(id);
-const post = (path, body, headers = {}) =>
-  fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) })
-    .then(async (r) => ({ status: r.status, body: await r.json() }));
+const call = (method, path, body, token) =>
+  fetch(path, { method, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+                body: body === undefined ? undefined : JSON.stringify(body) })
+    .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+const say = (el, text, cls = "hint") => { el.className = cls; el.textContent = text; };
+const expires = (jwt) => {
+  try { return JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).exp * 1000; } catch { return 0; }
+};
+
+function resetEnvironment(text) {
+  s.env = null; s.token = null; s.pick++;
+  $("deploy").disabled = true;
+  $("env").disabled = true;
+  $("env").replaceChildren(new Option(text, ""));
+  $("other").hidden = true;
+  say($("envStatus"), "");
+}
 
 $("signin").onclick = async () => {
-  const r = await post("signin", { environment: $("env").value });
-  if (r.status !== 200) { $("auth").textContent = r.body.error; return; }
-  const { device_code, user_code, verification_uri, interval } = r.body;
+  resetEnvironment("Sign in first");
+  $("signin").disabled = true;
+  const r = await call("POST", "signin", {});
+  $("signin").disabled = false;
+  if (r.status !== 200) { say($("auth"), r.body.error || "Could not start the sign-in.", "err"); return; }
+  const { device_code, user_code, verification_uri, interval, expires_in } = r.body;
+  const url = /^https:\/\/([a-z]+\.)?microsoft(online)?\.com\//.test(verification_uri) ? verification_uri : "https://microsoft.com/devicelogin";
   const link = document.createElement("a");
-  link.href = /^https:\/\/([a-z]+\.)?microsoft(online)?\.com\//.test(verification_uri) ? verification_uri : "https://microsoft.com/devicelogin";
-  link.target = "_blank"; link.rel = "noopener"; link.textContent = link.href;
+  link.href = url; link.target = "_blank"; link.rel = "noopener"; link.textContent = url;
+  const how = document.createElement("p"); how.append("Enter this code at ", link, ":");
   const code = document.createElement("p"); code.className = "code"; code.textContent = user_code;
+  const open = document.createElement("button"); open.textContent = "Copy the code and open the sign-in page";
+  open.onclick = async () => { try { await navigator.clipboard.writeText(user_code); } catch {} window.open(url, "_blank", "noopener"); };
   const wait = document.createElement("p"); wait.className = "hint"; wait.textContent = "Waiting for you to sign in…";
-  const open = document.createElement("p"); open.append("Open ", link, " and enter");
-  $("auth").replaceChildren(open, code, wait);
+  $("auth").className = ""; $("auth").replaceChildren(how, code, open, wait);
+  const until = Date.now() + (expires_in || 900) * 1000;
   const poll = async () => {
-    const p = await post("signin/poll", { device_code });
+    const p = await call("POST", "signin/poll", { device_code });
     if (p.body.status === "ok") {
-      token = p.body.access_token;
-      refreshToken = p.body.refresh_token || null;
-      $("auth").textContent = `Signed in as ${p.body.account} for ${p.body.environment}.`;
-      $("deploy").disabled = false;
-    } else if (p.body.status === "pending") {
+      s.discovery = p.body.access_token; s.refresh = p.body.refresh_token || null;
+      say($("auth"), `Signed in as ${p.body.account}.`, "ok");
+      $("signin").textContent = "Sign in with another account";
+      loadEnvironments();
+    } else if (p.body.status === "pending" && Date.now() < until) {
       setTimeout(poll, (interval || 5) * 1000);
     } else {
-      $("auth").textContent = p.body.error;
+      say($("auth"), p.body.error || "The code expired. Sign in again.", "err");
     }
   };
   setTimeout(poll, (interval || 5) * 1000);
 };
 
+async function loadEnvironments() {
+  resetEnvironment("Loading your environments…");
+  const r = await call("GET", "environments", undefined, s.discovery);
+  const list = r.status === 200 ? r.body.environments : [];
+  const first = list.length ? `Choose one of your ${list.length} environments` : "No environments found for your account";
+  const options = [new Option(first, "")];
+  for (const e of list) options.push(new Option(`${e.name}${e.kind ? ` · ${e.kind}` : ""} · ${new URL(e.url).host}`, e.url));
+  options.push(new Option("Another environment (enter its URL)…", "other"));
+  $("env").replaceChildren(...options);
+  $("env").disabled = false;
+  if (r.status !== 200) say($("envStatus"), `${r.body.error || "Could not list your environments."} You can enter one's URL.`, "err");
+  if (!list.length) { $("env").value = "other"; $("other").hidden = false; }
+}
+
+$("env").onchange = () => {
+  const value = $("env").value;
+  $("other").hidden = value !== "other";
+  if (value && value !== "other") useEnvironment(value, $("env").selectedOptions[0].textContent.split(" · ")[0]);
+  else { s.env = null; s.token = null; s.pick++; $("deploy").disabled = true; say($("envStatus"), ""); }
+};
+$("useUrl").onclick = () => useEnvironment($("envUrl").value.trim());
+
+// Trade the sign-in for a token to the environment picked, and hear whether the user's roles there allow a deploy.
+async function useEnvironment(url, name) {
+  const mine = ++s.pick;
+  s.env = null; s.token = null; $("deploy").disabled = true;
+  const label = name || url;
+  if (!s.refresh) { say($("envStatus"), "Sign in again: this sign-in can't reach other environments.", "err"); return; }
+  say($("envStatus"), `Checking your access to ${label}…`);
+  const r = await call("POST", "signin/environment", { environment: url, refreshToken: s.refresh });
+  if (mine !== s.pick) return;
+  if (r.status !== 200) { say($("envStatus"), r.body.error || `Could not use ${label}.`, "err"); return; }
+  s.env = r.body.environment; s.token = r.body.access_token; s.refresh = r.body.refresh_token || s.refresh;
+  if (r.body.canMakeAgents === false) {
+    say($("envStatus"), `Your roles in ${label} don't let you create ${r.body.missing.join(", ")}. Ask for the ` +
+        "Environment Maker role there, or pick another environment.", "warn");
+  } else if (r.body.canMakeAgents === null) {
+    say($("envStatus"), `Signed in to ${label}, but your roles there couldn't be checked.`, "warn");
+  } else {
+    say($("envStatus"), `You can make agents in ${label}.`, "ok");
+  }
+  $("deploy").disabled = false;
+}
+
+async function fresh(env) {
+  if (s.token && env === s.env && expires(s.token) - Date.now() > 5 * 60 * 1000) return s.token;
+  const r = await call("POST", "signin/environment", { environment: env, refreshToken: s.refresh });
+  if (r.status !== 200) throw new Error(r.body.error || "Sign in again.");
+  s.refresh = r.body.refresh_token || s.refresh;
+  if (env === s.env) s.token = r.body.access_token;
+  return r.body.access_token;
+}
+
 $("deploy").onclick = async () => {
   const file = $("egg").files[0];
+  if (!$("name").value.trim()) { $("out").textContent = "Give the agent a name first."; return; }
   if (!file) { $("out").textContent = "Pick an egg first."; return; }
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let bin = ""; for (const b of bytes) bin += String.fromCharCode(b);
+  const env = s.env;
   $("deploy").disabled = true;
   $("out").textContent = "Queuing the deploy…";
-  const auth = { Authorization: `Bearer ${token}` };
-  const r = await post("jobs", { environment: $("env").value, name: $("name").value, egg: btoa(bin),
-                                 hnApiName: $("hn").value || null, refreshToken }, auth);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = ""; for (const b of bytes) bin += String.fromCharCode(b);
+  let token;
+  try { token = await fresh(env); } catch (e) { $("out").textContent = e.message; $("deploy").disabled = false; return; }
+  const r = await call("POST", "jobs", { environment: env, name: $("name").value, egg: btoa(bin),
+                                         hnApiName: $("hn").value || null, refreshToken: s.refresh }, token);
   if (r.status !== 202) { $("out").textContent = `Failed: ${r.body.error}`; $("deploy").disabled = false; return; }
   const job = r.body.job;
   const watch = async () => {
-    const s = await fetch(`jobs/${job}`, { headers: auth }).then(async (x) => ({ status: x.status, body: await x.json() }));
-    if (s.status !== 200) { $("out").textContent = `Can't read the job (${s.body.error}). It keeps running; sign in again to watch it.`; return; }
-    const b = s.body;
+    try { token = await fresh(env); } catch { /* keep the last token; the read below says if it stopped working */ }
+    const st = await call("GET", `jobs/${job}`, undefined, token);
+    if (st.status !== 200) {
+      $("out").textContent = `Can't read the job (${st.body.error}). It keeps running; sign in again to watch it.`;
+      $("deploy").disabled = !s.env;
+      return;
+    }
+    const b = st.body;
     const head = b.state === "succeeded" ? `Deployed in ${b.seconds}s. Open it: ${b.result.makerUrl}`
                : b.state === "failed" ? `Failed: ${b.error}` : `Job ${job}: ${b.state}…`;
     $("out").textContent = head + "\n\n" + (b.log || []).slice(-40).join("\n");
-    if (b.state === "succeeded" || b.state === "failed") { $("deploy").disabled = false; return; }
+    if (b.state === "succeeded" || b.state === "failed") { $("deploy").disabled = !s.env; return; }
     setTimeout(watch, 5000);
   };
   setTimeout(watch, 3000);

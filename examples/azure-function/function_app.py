@@ -1,19 +1,24 @@
-"""brainfreeze-studio in an Azure Function: a person signs in with their own account and deploys an egg into a
-Copilot Studio environment they can make agents in.
+"""brainfreeze-studio in an Azure Function: a person signs in with their own account, picks one of their
+environments, and deploys an egg into it.
 
 The Function has no service account, and holds a user's sign-in only while their deploy runs (jobs.py). Sign-in is
 the user's own, through the device-code flow of a public client app registration (BFS_CLIENT_ID), which asks for
-delegated Dataverse access only. The page keeps the token in memory and sends it with the deploy. Dataverse checks
-that token (WhoAmI) before the Function does any work, and BFS_ALLOWED_TENANTS limits which organizations it serves.
-The deploy then runs with exactly that user's rights: brainfreeze_studio.build lays out the workspace, and
-brainfreeze_studio.deploy writes it into the environment through the Dataverse Web API, with no pac and no az.
+delegated Dataverse access only. The sign-in is for the Global Discovery Service, which lists the environments the
+user belongs to; picking one trades the sign-in's refresh token for a token to that environment and checks that the
+user's roles there let them make agents. The page keeps the tokens in memory and sends them with the deploy.
+Dataverse checks the token (WhoAmI) before the Function does any work, and BFS_ALLOWED_TENANTS limits which
+organizations it serves. The deploy then runs with exactly that user's rights: brainfreeze_studio.build lays out the
+workspace, and brainfreeze_studio.deploy writes it into the environment through the Dataverse Web API, with no pac
+and no az.
 
-    GET  /api/page           the page: sign in, pick an egg, deploy
-    POST /api/signin         {environment}           -> device code for that environment
-    POST /api/signin/poll    {device_code}           -> {status: pending} | {status: ok, access_token, ...}
-    POST /api/deploy         Bearer <user token>, {environment, name, egg | eggUrl, ...} -> deploy summary + log
-    POST /api/jobs           the same, run in the background (any size): -> 202 {job}
-    GET  /api/jobs/{job}     Bearer <user token> -> the job's state, log and result (its owner only)
+    GET  /api/page                the page: sign in, pick an environment and an egg, deploy
+    POST /api/signin              {environment?}    -> device code (for Global Discovery, or that environment)
+    POST /api/signin/poll         {device_code}     -> {status: pending} | {status: ok, access_token, refresh_token}
+    GET  /api/environments        Bearer <discovery token> -> the user's environments
+    POST /api/signin/environment  {environment, refreshToken} -> a token for that environment + the user's rights
+    POST /api/deploy              Bearer <user token>, {environment, name, egg | eggUrl, ...} -> summary + log
+    POST /api/jobs                the same, run in the background (any size): -> 202 {job}
+    GET  /api/jobs/{job}          Bearer <user token> -> the job's state, log and result (its owner only)
 
 Small agents fit in one HTTP request (230 seconds). Anything bigger, such as a library of tens of flows, goes
 through /api/jobs: a queue trigger runs it for up to an hour (see jobs.py).
@@ -21,7 +26,6 @@ through /api/jobs: a queue trigger runs it for up to an hour (see jobs.py).
 import base64
 import json
 import os
-import re
 import shutil
 import tempfile
 import traceback
@@ -49,7 +53,6 @@ TRANSLATIONS_OFF = ("translations run the egg's code inside this Function for th
                     "only when BFS_ALLOW_TRANSLATIONS=true and BFS_ALLOWED_TENANTS lists the organizations it serves")
 MAX_EGG = 16 * 1024 * 1024
 MAX_ZIP = 32 * 1024 * 1024
-ENV_URL = re.compile(r"^https://[a-z0-9-]+\.crm[0-9]*\.dynamics\.com/?$")
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 verify = auth.Verifier(ALLOWED_TENANTS)
@@ -69,7 +72,7 @@ def _json(obj, status=200):
 
 def _environment(value):
     env = (value or "").strip()
-    if not ENV_URL.match(env):
+    if not auth.ENV_URL.match(env):
         raise ValueError("environment must be a Dataverse URL such as https://yourorg.crm.dynamics.com/")
     return env.rstrip("/") + "/"
 
@@ -115,16 +118,26 @@ def _b64(value, limit, what):
     return data
 
 
+def _body(req):
+    try:
+        body = req.get_json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 @app.route(route="signin", methods=["POST"])
 def signin(req: func.HttpRequest) -> func.HttpResponse:
+    """Start the user's sign-in: for Global Discovery (to list their environments), or for one environment."""
     if not CLIENT_ID:
         return _json({"error": "BFS_CLIENT_ID is not set"}, 500)
     try:
-        environment = _environment((req.get_json() or {}).get("environment"))
+        wanted = _body(req).get("environment")
+        resource = _environment(wanted) if wanted else auth.DISCOVERY
     except ValueError as e:
         return _json({"error": str(e)}, 400)
     r = _post_form(f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/devicecode",
-                   {"client_id": CLIENT_ID, "scope": f"{environment}user_impersonation offline_access openid profile"})
+                   {"client_id": CLIENT_ID, "scope": f"{resource}user_impersonation offline_access openid profile"})
     if "device_code" not in r:
         return _json({"error": r.get("error_description") or r.get("error") or "could not start sign-in"}, 502)
     return _json({k: r[k] for k in ("device_code", "user_code", "verification_uri", "expires_in", "interval", "message")})
@@ -132,7 +145,7 @@ def signin(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="signin/poll", methods=["POST"])
 def signin_poll(req: func.HttpRequest) -> func.HttpResponse:
-    device_code = (req.get_json() or {}).get("device_code")
+    device_code = _body(req).get("device_code")
     if not device_code:
         return _json({"error": "device_code is required"}, 400)
     r = _post_form(f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token",
@@ -146,6 +159,46 @@ def signin_poll(req: func.HttpRequest) -> func.HttpResponse:
     if r.get("error") in ("authorization_pending", "slow_down"):
         return _json({"status": "pending"})
     return _json({"status": "error", "error": r.get("error_description") or r.get("error")}, 400)
+
+
+@app.route(route="environments", methods=["GET"])
+def environments(req: func.HttpRequest) -> func.HttpResponse:
+    """The environments the signed-in user belongs to (Global Discovery, with their own token)."""
+    try:
+        return _json({"environments": verify.environments(auth.bearer(req))})
+    except PermissionError as e:
+        return _json({"error": str(e)}, 401)
+    except RuntimeError as e:
+        return _json({"error": str(e)}, 502)
+
+
+@app.route(route="signin/environment", methods=["POST"])
+def signin_environment(req: func.HttpRequest) -> func.HttpResponse:
+    """Trade the sign-in's refresh token for the user's token to the environment they picked, have Dataverse accept
+    it, and say what their roles there don't let them create. Nothing is stored."""
+    if not CLIENT_ID:
+        return _json({"error": "BFS_CLIENT_ID is not set"}, 500)
+    try:
+        body = _body(req)
+        environment = _environment(body.get("environment"))
+        if not body.get("refreshToken"):
+            raise PermissionError("sign in first")
+        user = auth.UserToken(None, environment, body["refreshToken"], CLIENT_ID, TENANT)
+        token = user()
+        claims, who = verify(token, environment)
+        try:
+            missing = verify.missing_rights(token, environment, who.get("UserId"))
+        except RuntimeError:
+            missing = None
+        return _json({"status": "ok", "environment": environment, "access_token": token,
+                      "refresh_token": user.refresh_token, "account": claims.get("upn") or claims.get("unique_name"),
+                      "canMakeAgents": None if missing is None else not missing, "missing": missing or []})
+    except PermissionError as e:
+        return _json({"status": "error", "error": str(e)}, 401)
+    except ValueError as e:
+        return _json({"status": "error", "error": str(e)}, 400)
+    except (urllib.error.URLError, OSError) as e:
+        return _json({"status": "error", "error": f"could not reach the sign-in service: {e}"}, 502)
 
 
 @app.route(route="deploy", methods=["POST"])
