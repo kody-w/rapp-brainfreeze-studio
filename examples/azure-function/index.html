@@ -17,7 +17,7 @@
 <body>
 <h1>Deploy a brainstem to Copilot Studio</h1>
 <p class="hint">You sign in with your own account. The agent is created with your rights, in an environment you can
-make agents in. This page never stores your sign-in.</p>
+make agents in. This page never stores your sign-in; a background deploy holds it only while it runs.</p>
 
 <label for="env">Environment URL</label>
 <input id="env" placeholder="https://yourorg.crm.dynamics.com/">
@@ -34,7 +34,7 @@ make agents in. This page never stores your sign-in.</p>
 <pre id="out"></pre>
 
 <script>
-let token = null;
+let token = null, refreshToken = null;
 const $ = (id) => document.getElementById(id);
 const post = (path, body, headers = {}) =>
   fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) })
@@ -55,6 +55,7 @@ $("signin").onclick = async () => {
     const p = await post("signin/poll", { device_code });
     if (p.body.status === "ok") {
       token = p.body.access_token;
+      refreshToken = p.body.refresh_token || null;
       $("auth").textContent = `Signed in as ${p.body.account} for ${p.body.environment}.`;
       $("deploy").disabled = false;
     } else if (p.body.status === "pending") {
@@ -72,12 +73,23 @@ $("deploy").onclick = async () => {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let bin = ""; for (const b of bytes) bin += String.fromCharCode(b);
   $("deploy").disabled = true;
-  $("out").textContent = "Deploying… this takes a minute or two.";
-  const r = await post("deploy", { environment: $("env").value, name: $("name").value, egg: btoa(bin),
-                                   hnApiName: $("hn").value || null }, { Authorization: `Bearer ${token}` });
-  $("deploy").disabled = false;
-  const b = r.body;
-  $("out").textContent = (b.ok ? `Deployed. Open it: ${b.result.makerUrl}\n\n` : `Failed: ${b.error}\n\n`) + (b.log || []).join("\n");
+  $("out").textContent = "Queuing the deploy…";
+  const auth = { Authorization: `Bearer ${token}` };
+  const r = await post("jobs", { environment: $("env").value, name: $("name").value, egg: btoa(bin),
+                                 hnApiName: $("hn").value || null, refreshToken }, auth);
+  if (r.status !== 202) { $("out").textContent = `Failed: ${r.body.error}`; $("deploy").disabled = false; return; }
+  const job = r.body.job;
+  const watch = async () => {
+    const s = await fetch(`jobs/${job}`, { headers: auth }).then(async (x) => ({ status: x.status, body: await x.json() }));
+    if (s.status !== 200) { $("out").textContent = `Can't read the job (${s.body.error}). It keeps running; sign in again to watch it.`; return; }
+    const b = s.body;
+    const head = b.state === "succeeded" ? `Deployed in ${b.seconds}s. Open it: ${b.result.makerUrl}`
+               : b.state === "failed" ? `Failed: ${b.error}` : `Job ${job}: ${b.state}…`;
+    $("out").textContent = head + "\n\n" + (b.log || []).slice(-40).join("\n");
+    if (b.state === "succeeded" || b.state === "failed") { $("deploy").disabled = false; return; }
+    setTimeout(watch, 5000);
+  };
+  setTimeout(watch, 3000);
 };
 </script>
 </body>

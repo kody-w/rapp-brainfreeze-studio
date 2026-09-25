@@ -1,8 +1,8 @@
 # brainfreeze-studio in an Azure Function
 
 A person signs in with **their own account** and deploys a brainstem egg into a Copilot Studio environment they
-can make agents in. The Function holds no service account and stores no tokens. Every change lands with the
-signed-in user's rights.
+can make agents in. The Function has no service account, and holds a user's sign-in only while their deploy
+runs. Every change lands with the signed-in user's rights.
 
 ```
 browser page ──device-code sign-in (the user)──▶ Entra ID ──▶ delegated Dataverse token (kept in the page)
@@ -36,7 +36,9 @@ browser page ──device-code sign-in (the user)──▶ Entra ID ──▶ de
 2. Create a Python 3.11 Function App (Flex Consumption works), then set these app settings:
    - `BFS_CLIENT_ID`: the app registration's appId.
    - `BFS_TENANT`: `organizations`, or one tenant id.
-   - `BFS_ALLOW_TRANSLATIONS`: optional; see the note below.
+   - `BFS_ALLOWED_TENANTS`: the tenant ids this deployment serves, comma-separated. Callers from any other tenant
+     are refused. Leave it empty to serve every tenant, without translations.
+   - `BFS_ALLOW_TRANSLATIONS`: optional, and only with `BFS_ALLOWED_TENANTS`; see the note below.
 
 3. Publish: `./publish.sh <function app name> [path to copilot-harness-sdk]`. This bundles brainfreeze_studio, the
    SDK's `tutorial/` assets and `azure-functions`, then runs `func azure functionapp publish`.
@@ -51,17 +53,42 @@ Open `https://<app>.azurewebsites.net/api/page`, sign in, pick an egg and deploy
 | `POST /api/signin` `{environment}` | Starts the user's device-code sign-in for that environment. |
 | `POST /api/signin/poll` `{device_code}` | Returns `pending`, or the user's token (to the page, never stored). |
 | `POST /api/deploy` | `Authorization: Bearer <user token>`, `{environment, name, egg (base64) \| eggUrl, schemaName?, hnApiName?, translations?}` → the deploy summary, the maker URL and the log. |
+| `POST /api/jobs` | The same body, plus `translationsZip`, `workspaceZip` and `refreshToken` → `202 {job}`. A background deploy of any size. |
+| `GET /api/jobs/{job}` | `Authorization: Bearer <user token>` → the job's state (`queued`, `running`, `deploying`, `succeeded`, `failed`), its log and its result. Only the user who queued the job can read it. |
 
-The deploy accepts only a delegated user token whose audience is the environment being deployed to. An app-only
-token is refused.
+Every route that does work first has Dataverse check the caller's token (`WhoAmI` in the target environment), so
+the Function acts only on a token Dataverse accepts. It must be a signed-in user's delegated token whose audience
+is the environment being deployed to, from an allowed tenant. A made-up, app-only, expired or wrong-tenant token
+gets a 401 before anything is built, fetched or queued (`auth.py`).
+
+## Background jobs (big agents)
+
+An HTTP request is cut off at 230 seconds. A library of tens of agents (the AIBAST Copilot has 72 flows) takes
+longer, so `POST /api/jobs` returns at once and a queue trigger does the work, for up to an hour (`host.json`).
+The page always uses jobs.
+
+- **The user's sign-in is held only while the job runs.** It sits in the job's request blob, which only the
+  Function's managed identity can reach (private storage, no shared keys). The blob is deleted when the job ends,
+  and a lifecycle rule on the `bfs-deploy-jobs/` container deletes anything older than a day that a crashed job
+  left behind.
+- **Long jobs need a refresh token.** With one (the page sends the one from its sign-in), a job outlasts the
+  access token, which lives about an hour. Without one, the job must finish before that token expires.
+- **A stopped job resumes when run again.** Deploys are idempotent, so the second run only does what's left.
+- **Failed jobs aren't retried.** Each job runs once (`maxDequeueCount: 1`), one at a time per instance, and the
+  outcome is in the job's status. A job whose host stopped it (the time limit, or a restart) reads as failed once
+  it is past the time limit, so the page stops waiting for it.
+
+Storage is reached over its REST API with the managed identity's token, so `jobs.py`, like the rest of the app,
+needs nothing beyond the standard library and `azure-functions`.
 
 ## Notes
 
-- **Translations run the egg's code.** Their parity proof runs the agent in a subprocess, so they are off unless
-  `BFS_ALLOW_TRANSLATIONS=true`. Turn them on only where you trust the eggs, or build in an isolated job. Without
-  translations, a build reads agent code without running it.
-- **Keep deploys small.** An HTTP request is cut off at 230 seconds. A small agent deploys in about two minutes;
-  a large library (tens of flows) needs a queue-triggered deploy.
+- **Translations run the egg's code.** Their parity proof runs the agent in a subprocess of the Function, which
+  also holds the sign-ins of other users' running jobs. So translations are on only when
+  `BFS_ALLOW_TRANSLATIONS=true` and `BFS_ALLOWED_TENANTS` names the tenants whose eggs you trust. Otherwise they
+  are refused. Without translations, a build reads agent code without running it.
+- **Use `/api/deploy` for small agents only.** It answers in one request, which suits an agent that deploys within
+  about two minutes. Use `/api/jobs` for anything bigger.
 - **Private storage works.** In a subscription whose policy forces private storage and no shared keys, run the app
   with VNet integration, storage private endpoints (blob, queue, table) and managed-identity storage
   (`AzureWebJobsStorage__accountName`).

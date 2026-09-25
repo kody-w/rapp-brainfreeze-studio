@@ -80,7 +80,9 @@ their own synthetic data: an `operation` plus record selectors in, markdown out.
 off, clock frozen), learns what each input does (an exact value, a case-insensitive value, the library's
 name-resolver idiom, text it echoes, or ignored), tables every output, and compiles a lookup flow. The proof
 runs every recorded case plus probes through the real Python and the compiled flow, on three frozen clocks
-when the agent prints dates, so dates it prints relative to today follow the flow's clock. An operation
+when the agent prints dates, so dates it prints relative to today follow the flow's clock. It runs agent code
+under the brainstem engine's Python (3.11 for the grail) and records that version in the spec, because an agent's
+output can depend on it: Python 3.12 changed how `sum()` adds floats, which moves a rounded percentage. An operation
 computed from numbers gets a small hand translation (`materialize(..., hand=)`): a state the flow computes
 from the numbers, plus the numbers it prints, proven on a grid. An agent that keeps state between calls is
 refused. Every materialized tool's description ends with the values its selectors accept, because the
@@ -110,8 +112,12 @@ deploy("out/workspace", "https://yourorg.crm.dynamics.com/", get_token=lambda: u
 
 [`examples/azure-function`](examples/azure-function) runs build and deploy in an Azure Function. The user signs in
 on a small page with their own account (device code, delegated Dataverse access only), picks an egg and deploys.
-The Function stores no tokens. Deployed from a laptop and from the Function as the same user, one egg gave
-identical agents.
+The Function has no service account, and holds a user's sign-in only while their deploy runs. Deployed from a
+laptop and from the Function as the same user, one egg gave identical agents. Agents too big for one HTTP
+request, such as libraries of tens of flows, deploy as background jobs: `POST /api/jobs` returns at once, a queue
+trigger runs the build and deploy for up to an hour, and `GET /api/jobs/{id}` shows the progress to the user who
+started it. Dataverse checks the user's token before the Function does any work, and translations, which run the
+egg's code there, need a list of the tenants it serves.
 
 ## How close is it?
 

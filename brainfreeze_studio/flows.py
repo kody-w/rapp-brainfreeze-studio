@@ -660,7 +660,7 @@ for line in sys.stdin:
 
 def prove_materialized(spec, agent_file, basic_file, schema_name=None):
     """Every vector through the real agent.py (sandboxed, same frozen clock) and through the compiled flow."""
-    from .materialize import CLOCKS, Runner
+    from .materialize import CLOCKS, Runner, agent_python
     flow = compile_materialized(spec, schema_name)
     blocked = set(spec.get("blocked_operations") or {})
     primary = spec.get("primary")
@@ -668,7 +668,8 @@ def prove_materialized(spec, agent_file, basic_file, schema_name=None):
     # a flow that fills dates from its clock is proven on every frozen clock, not just the one it was built on
     first = (spec.get("materialized_with") or {}).get("clock") or CLOCKS[0]
     clocks = [first] + ([c for c in CLOCKS if c != first] if spec.get("clock_formats") else [])
-    runner = Runner(agent_file, basic_file, spec.get("class") or "")
+    runner = Runner(agent_file, basic_file, spec.get("class") or "",
+                    python=agent_python((spec.get("materialized_with") or {}).get("python")))
     results = []
     for clock in clocks:
         for vec, py in zip(vectors, runner.run(vectors, clock=clock)):
@@ -679,7 +680,7 @@ def prove_materialized(spec, agent_file, basic_file, schema_name=None):
             results.append({"args": vec, "clock": clock, "python": py, "flow": flow_out, "match": py == flow_out})
     passed = sum(r["match"] for r in results)
     return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": len(results), "passed": passed,
-            "clocks": clocks,
+            "clocks": clocks, "python": runner.python_version(),
             "parity": passed == len(results) and len(results) > 0, "mode": "materialized",
             "blocked_operations": spec.get("blocked_operations") or {},
             "approximated_inputs": [k["input"] for k in spec["keying"] if k.get("approximated")],

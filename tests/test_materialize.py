@@ -179,6 +179,20 @@ class MaterializeTests(unittest.TestCase):
         self.assertIn("Set `operation` to exactly one of: credit_check, note, renewal, seats, summary.", desc)
         self.assertIn(f"workflowId: wf-1", flows.tool_yaml(spec, "wf-1"))
 
+    def test_proofs_run_agent_code_under_the_python_the_spec_was_made_with(self):
+        import os
+        from unittest import mock
+        from brainfreeze_studio.materialize import agent_python
+        spec, _ = desk_spec()
+        here = ".".join(map(str, sys.version_info[:2]))
+        self.assertTrue(spec["materialized_with"]["python"].startswith(here + "."))
+        self.assertEqual(agent_python(here + ".0"), sys.executable)
+        self.assertEqual(agent_python(None), sys.executable)
+        with mock.patch("shutil.which", return_value="/opt/python3.9") as which:
+            self.assertEqual(agent_python("3.9.1") if here != "3.9" else "/opt/python3.9", "/opt/python3.9")
+        with mock.patch.dict(os.environ, {"BFS_AGENT_PYTHON": "/custom/python"}):
+            self.assertEqual(agent_python("3.9.1"), "/custom/python")
+
     def test_expressions_over_the_power_automate_limit_are_refused(self):
         spec, _ = desk_spec()
         flow = compile_flow(spec, "rapp_Test")

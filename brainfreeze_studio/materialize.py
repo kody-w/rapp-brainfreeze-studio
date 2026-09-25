@@ -32,8 +32,10 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import random
 import re
+import shutil
 import string
 import subprocess
 import sys
@@ -330,6 +332,24 @@ for line in sys.stdin:
 '''
 
 
+def agent_python(version=None):
+    """The interpreter to run agent code under. An agent's output can depend on the Python version (3.12 changed
+    how sum() adds floats, which moves a rounded percentage), so a proof runs under the minor version its spec was
+    materialized with: BFS_AGENT_PYTHON when set, else this interpreter if it matches, else pythonX.Y on PATH, else
+    this interpreter. Materialize with the brainstem engine's Python (3.11 for the grail)."""
+    override = os.environ.get("BFS_AGENT_PYTHON")
+    if override:
+        return override
+    if version:
+        minor = ".".join(str(version).split(".")[:2])
+        if ".".join(map(str, sys.version_info[:2])) == minor:
+            return sys.executable
+        found = shutil.which(f"python{minor}")
+        if found:
+            return found
+    return sys.executable
+
+
 class Runner:
     """Runs one agent file's perform() in a sandboxed subprocess, a batch of cases at a time."""
 
@@ -337,6 +357,13 @@ class Runner:
         self.agent_file, self.basic_file = str(agent_file), str(basic_file)
         self.class_name, self.python, self.timeout = class_name or "", python or sys.executable, timeout
         self.calls = 0
+        self._version = None
+
+    def python_version(self):
+        if self._version is None:
+            self._version = subprocess.run([self.python, "-c", "import platform; print(platform.python_version())"],
+                                           capture_output=True, text=True, timeout=60).stdout.strip()
+        return self._version
 
     def _exchange(self, requests, clock=CLOCKS[0], hashseed="0"):
         env = {"PYTHONHASHSEED": str(hashseed), "PATH": "/usr/bin:/bin", "HOME": str(Path(self.agent_file).parent)}
@@ -943,7 +970,8 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
         "hand_operations": {op: h.get("why", "") for op, h in hand_ops.items() if ops.get(op, {}).get("hand")},
         "clock_formats": clock_formats, "caveats": caveats,
         "source_sha256": source_sha,
-        "materialized_with": {"clock": CLOCKS[0], "checked_clock": CLOCKS[1] if check_clock else None,
+        "materialized_with": {"clock": CLOCKS[0], "python": runner.python_version(),
+                              "checked_clock": CLOCKS[1] if check_clock else None,
                               "checked_clocks": list(CLOCKS[1:]) if check_clock else [],
                               "cases": len(cases_all), "unique_outputs": len(uniq)},
     }
