@@ -407,10 +407,11 @@ def build_host(build_dir=None, outfile=None, sdk_alias=None, npm="npm", log=prin
 
 
 def package(rapp, out_dir, *, schema_name, environment_id=None, display_name=None, tools=None, description=None,
-            fetch_vendor=_default_fetch, host_js=None, chat=None):
+            fetch_vendor=_default_fetch, host_js=None, chat=None, example=None):
     """Write out_dir/codeapp: dist/ (the app), power.config.json and report.json. `tools` lists the agent's tools:
     [{"name", "aliases", "flow": {"workflowId", "displayName"} | None}]; `chat` is the chat broker flow
-    ({"workflowId", "displayName"}) the app reaches the agent through, for tools without a flow and free-form chat."""
+    ({"workflowId", "displayName"}) the app reaches the agent through, for tools without a flow and free-form chat.
+    `example` ({CSS selector: value}) fills the UI's empty fields when it opens, so it can be tried at once."""
     if not rapp.ui:
         raise ValueError(f"{rapp.id} has no UI to make a code app from")
     out = Path(out_dir).expanduser() / "codeapp"
@@ -453,6 +454,8 @@ def package(rapp, out_dir, *, schema_name, environment_id=None, display_name=Non
                   "summary": rapp.summary, "tagline": rapp.tagline, "category": rapp.category,
                   "catalog_source": "kody-w/RAPP_Store" if rapp.source.get("kind") == "store" else rapp.source.get("kind")}
     config = {"rapp": rapp_entry, "agent": agent, "tools": tool_cfg, "dataSourcesInfo": sources}
+    if example:
+        config["example"] = example
     (dist / "rapp-config.js").write_text("window.RAPP_CONFIG = " + json.dumps(config, indent=1) + ";\n")
     power = {"version": "1.0", "appId": None, "appDisplayName": display_name, "region": "prod", "appType": "CodeApp",
              "environmentId": environment_id, "description": description or rapp.summary[:300], "buildPath": "./dist",

@@ -343,8 +343,10 @@ def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=N
     app = None
     if r.ui:
         kw = {"fetch_vendor": fetch_vendor} if fetch_vendor is not None else {}
+        example = next((a["ui_example"] for a in built["agents"] if a.get("ui_example")), None)
         app = codeapp.package(r, out, schema_name=schema, display_name=display, tools=tools, host_js=host_js,
-                              chat={"workflowId": chat["id"], "displayName": chat["name"]} if chat else None, **kw)
+                              chat={"workflowId": chat["id"], "displayName": chat["name"]} if chat else None,
+                              example=example, **kw)
     summary = {
         "kind": "brainfreeze-studio-rapplication", "rappid": manifest["rappid"], "egg": egg_path.name,
         "egg_address": rapp1.egg_address(manifest),

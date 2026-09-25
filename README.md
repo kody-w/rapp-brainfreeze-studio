@@ -110,7 +110,10 @@ recorded HTTP responses. Any difference refuses it. The flow around the code doe
 - **Files** (JSON Doctor): each path the call names is read from the SharePoint folder in the RAPP Files Site and
   RAPP Files Folder environment variables (a relative path inside the folder; anything else is never read), and the code gets the bytes.
   60/60 offline; live, 11/11 flow runs matched the Python on the uploaded bytes, and the harness agent, asked in
-  plain words, called the tool with the right arguments and returned the proven output.
+  plain words, called the tool with the right arguments and returned the proven output. **Every port that reads files
+  can be tried with no files of one's own:** its spec carries built-in `samples` (embedded in the flow, proven like
+  the rest; a file of the same path in the folder wins), its tool description names them, and its `ui_example` opens
+  the code app with a sample already filled in (`tests/test_connector_code.py` enforces all three).
 
 Ports are written by hand today; the gate is what makes them safe to ship. A passing proof can be recorded
 (`python3 -m brainfreeze_studio record-proof translations/json_doctor.json <agent.py>` writes

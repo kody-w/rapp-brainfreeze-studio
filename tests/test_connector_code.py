@@ -229,7 +229,7 @@ class JsonDoctorTests(unittest.TestCase):
     def test_the_port_matches_the_python_on_every_file(self):
         r = self.prove(self.spec)
         self.assertTrue(r["parity"], json.dumps(r["mismatches"][:2])[:2000])
-        self.assertEqual(r["cases"], 60)
+        self.assertEqual(r["cases"], sum(len(q) for q in self.spec["sequences"]))
         out = {json.dumps(x["args"], sort_keys=True): json.loads(x["python"]["output"]) for x in r["records"]}
 
         def answer(**args):
@@ -263,6 +263,25 @@ def connector_specs():
                 yield spec
 
 
+class TryItTests(unittest.TestCase):
+    def test_every_port_that_reads_files_can_be_tried_with_no_files_of_ones_own(self):
+        """Built-in samples, proven like the rest, an app that opens filled in with one, and a tool description that
+        names them (the harness agent reads only that)."""
+        ports = [s for s in connector_specs() if s.get("file_inputs")]
+        self.assertTrue(ports)
+        for spec in ports:
+            with self.subTest(spec["agent"]):
+                samples = spec.get("samples") or {}
+                self.assertTrue(samples, "give the port built-in samples")
+                self.assertTrue(set((spec.get("ui_example") or {}).values()) & set(samples), "fill the UI with a sample")
+                for path in samples:
+                    self.assertIn(path, spec["description"])
+                    self.assertTrue(cc.library_path(path))
+                    self.assertNotIn(path, spec.get("fixtures") or {})       # the proof reads the sample itself
+                tried = {c["args"].get(k) for seq in spec["sequences"] for c in seq for k in spec["file_inputs"]}
+                self.assertTrue(set(samples) <= tried, "prove every sample")
+
+
 class RecordedProofTests(unittest.TestCase):
     """A build without the .NET SDK (the Azure Function), or one that runs no agent code, lays a port only on a
     proof recorded for its exact bytes: the agent's source, its BasicAgent, the linked script and the spec."""
@@ -280,7 +299,8 @@ class RecordedProofTests(unittest.TestCase):
     def test_a_proof_holds_only_for_the_bytes_it_ran(self):
         spec = next(s for s in connector_specs() if s["agent"] == "JsonDoctor")
         script = (Path(spec["_dir"]) / spec["script"]).read_text(encoding="utf-8")
-        self.assertEqual(cc.recorded_proof(spec, spec["source_sha256"], BASIC_SHA, script)["cases"], 60)
+        self.assertEqual(cc.recorded_proof(spec, spec["source_sha256"], BASIC_SHA, script)["cases"],
+                         sum(len(q) for q in spec["sequences"]))
         self.assertIsNone(cc.recorded_proof(spec, "0" * 64, BASIC_SHA, script))                      # other agent code
         self.assertIsNone(cc.recorded_proof(spec, spec["source_sha256"], "1" * 64, script))           # another BasicAgent
         self.assertIsNone(cc.recorded_proof(spec, spec["source_sha256"], BASIC_SHA, script + "\n// changed"))
@@ -318,7 +338,8 @@ class BuildWithoutProvingTests(unittest.TestCase):
         self.assertEqual(agent["as"], "agent flow + connector code (ported, parity proven)")
         out = next(d for d in self.tmp.iterdir() if d.name.startswith("out"))
         report = json.loads((out / "parity" / "JsonDoctorFlow.json").read_text())
-        self.assertEqual((report["cases"], report["passed"], bool(report["recorded"])), (60, 60, True))
+        cases = sum(len(q) for q in json.loads((ROOT / "translations" / "json_doctor.json").read_text())["sequences"])
+        self.assertEqual((report["cases"], report["passed"], bool(report["recorded"])), (cases, cases, True))
 
     def test_with_proofs_off_no_agent_code_runs_and_a_changed_port_is_refused(self):
         changed = self.tmp / "translations"
@@ -337,7 +358,9 @@ class FlowTests(unittest.TestCase):
     FILES_SPEC = {"agent": "JsonDoctor", "flow_name": "JsonDoctorFlow", "description": "Reads a file.",
                   "inputs": {"action": {"type": "string"}, "path": {"type": "string"}, "other": {"type": "string"}},
                   "required": ["action", "path"], "file_inputs": ["path", "other"],
-                  "fixtures": {"data/a.json": {"text": "[1]"}, "b.json": {"base64": "77u/e30="}, "empty.json": {"text": ""}}}
+                  "fixtures": {"data/a.json": {"text": "[1]"}, "b.json": {"base64": "77u/e30="}, "empty.json": {"text": ""},
+                               "samples/mine.json": {"text": "[\"mine\"]"}},
+                  "samples": {"samples/s.json": {"text": "[2]"}, "samples/mine.json": {"text": "[\"sample\"]"}}}
 
     def files_flow(self, **home):
         return cc.compile_flow(self.FILES_SPEC, "rapp_JsonDoctor", "JSON Doctor", "JSONDoctor JsonDoctor code",
@@ -346,7 +369,9 @@ class FlowTests(unittest.TestCase):
     def test_a_files_flow_reads_each_named_file_from_sharepoint_and_hands_them_to_the_code(self):
         flow = self.files_flow(site="https://contoso.sharepoint.com/sites/team")
         d = flow["properties"]["definition"]
-        self.assertEqual(list(d["actions"]), ["Read_file_path", "Read_file_other", "Run_the_agent", "Respond_to_agent"])
+        self.assertEqual(list(d["actions"]), ["Samples", "Read_file_path", "Read_file_other", "Run_the_agent",
+                                              "Respond_to_agent"])
+        self.assertEqual(d["actions"]["Samples"]["inputs"], {"samples/s.json": "WzJd", "samples/mine.json": "WyJzYW1wbGUiXQ=="})
         get = d["actions"]["Read_file_path"]["actions"]["Get_file_path"]["inputs"]
         self.assertEqual(get["host"]["operationId"], "GetFileContentByPath")
         self.assertIs(get["parameters"]["inferContentType"], False)          # the bytes, never a parsed body
@@ -380,13 +405,19 @@ class FlowTests(unittest.TestCase):
                  {"action": "a", "path": "data/a.json", "other": "data/a.json"},
                  {"action": "a", "path": "../data/a.json"}, {"action": "a", "path": "/data/a.json"},
                  {"action": "a", "path": "data/../data/a.json"}, {"action": "a", "path": "\\data\\a.json"},
-                 {"action": "a", "path": "empty.json"}]
+                 {"action": "a", "path": "empty.json"}, {"action": "a", "path": "samples/s.json", "other": "samples/mine.json"},
+                 {"action": "a", "path": "samples/nope.json"}, {"action": "a", "path": "/samples/s.json"}]
         for args in cases:
             self.assertEqual(files_sent(flow, args, library), cc.files_body(self.FILES_SPEC, args), args)
         self.assertEqual(cc.files_body(self.FILES_SPEC, cases[1]), {"path": {"path": "b.json", "content": "77u/e30="},
                                                                    "other": {"path": "data/a.json", "content": "WzFd"}})
         self.assertEqual(cc.files_body(self.FILES_SPEC, cases[2])["path"], {"path": "missing.json", "content": None})
-        self.assertEqual(cc.files_body(self.FILES_SPEC, cases[-1])["path"], {"path": "empty.json", "content": ""})
+        self.assertEqual(cc.files_body(self.FILES_SPEC, cases[-4])["path"], {"path": "empty.json", "content": ""})
+        with_samples = cc.files_body(self.FILES_SPEC, cases[-3])            # a sample; the library's file wins
+        self.assertEqual(with_samples, {"path": {"path": "samples/s.json", "content": "WzJd"},
+                                        "other": {"path": "samples/mine.json", "content": "WyJtaW5lIl0="}})
+        self.assertIsNone(cc.files_body(self.FILES_SPEC, cases[-2])["path"]["content"])
+        self.assertIsNone(cc.files_body(self.FILES_SPEC, cases[-1])["path"]["content"])
         self.assertEqual(cc.files_body(self.FILES_SPEC, cases[4]), {"path": {"path": None, "content": None},
                                                                    "other": {"path": None, "content": None}})
 

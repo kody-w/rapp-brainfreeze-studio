@@ -3,10 +3,10 @@
   "source_sha256": "e532be574326b108ede0dbbd7d3c012cf275c9f2aee51793864c45546938f20e",
   "basic_sha256": "701488bc00d536a7b23295e7da99c62f24e9b00f233daa325886430c736b78eb",
   "script_sha256": "f604006e5f2f6e1def02d85850992ec11480d85af260b06a6a5bf8adc96ac8b8",
-  "spec_sha256": "5cafa0366981f77e975cb884eadf0916a260e06a166ddc7579e312611482724e",
+  "spec_sha256": "0b038c902eb1c7215b8f0cc4d3002cb16e9bff07edcaf988713b111fbb20ff95",
   "python": "3.11",
-  "cases": 60,
-  "passed": 60,
+  "cases": 69,
+  "passed": 69,
   "parity": true,
   "proven": "2026-09-25"
 }

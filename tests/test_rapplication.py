@@ -234,6 +234,18 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in refs.values()], [codeapp.LOGIC_FLOWS_API])   # no connector in the app
         self.assertEqual(s["codeapp"]["report"]["tools"], {"InvoiceRouter": "agent"})
 
+    def test_a_ports_example_opens_the_app_filled_in(self):
+        self.assertNotIn("example", app_config(self.out))                   # this port's UI has its own defaults
+        translations = self.tmp / "with-example"
+        shutil.copytree(TRANSLATIONS, translations)
+        spec = json.loads((translations / "invoice_router.json").read_text())
+        spec["ui_example"] = {"#vendor": "Northwind Traders", "#amount": "4200"}
+        (translations / "invoice_router.json").write_text(json.dumps(spec))
+        s = rapplication.prepare(EXAMPLE, self.tmp / "out-example", translations=str(translations), fetch_vendor=None,
+                                 host_js=self.host, created_utc=UTC)
+        self.assertEqual(s["agent"]["agents"][0]["ui_example"], spec["ui_example"])
+        self.assertEqual(app_config(self.tmp / "out-example")["example"], spec["ui_example"])
+
     def test_running_it_again_keeps_the_rappid(self):
         again = rapplication.prepare(EXAMPLE, self.out, translations=str(TRANSLATIONS), fetch_vendor=None,
                                      host_js=self.host, created_utc=UTC)

@@ -49,7 +49,9 @@ def files_sent(flow, given, library):
     sharepoint = {f"{folder}/{rel}": data for rel, data in library.items()}
     ctx = {"trigger": dict(given), "outputs": {}, "parameters": params, "actions": {}}
     for name, action in d["actions"].items():
-        if name.startswith("Read_file_"):
+        if action["type"] == "Compose":
+            ctx["outputs"][name] = flows.evaluate(action["inputs"], ctx)
+        elif name.startswith("Read_file_"):
             (get_name, get), = action["actions"].items()
             if not condition(action["expression"], ctx):
                 ctx["actions"][get_name] = {"status": "Skipped"}

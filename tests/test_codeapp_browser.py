@@ -119,6 +119,14 @@ class CodeAppBrowserTests(unittest.TestCase):
         run_code = player._run_code
         player._run_code = lambda flow, code, given: answers.append(run_code(flow, code, given)["result"]) or \
             {"result": answers[-1]}
+        # it opens filled in with its example, on the built-in samples: Run works with no files of one's own
+        ui.locator("#path").wait_for(timeout=15000)
+        self.assertEqual((ui.locator("#path").input_value(), ui.locator("#extra").input_value()),
+                         ("samples/users.json", "samples/users_v2.json"))
+        ui.locator("#go").click()
+        ui.locator("#out .card").wait_for(timeout=30000)
+        self.assertIn("40 record(s) · array · 6460 bytes", ui.locator("#out").inner_text())
+        answers.clear()
         steps = [("inspect", "data/users.json", ""), ("validate", "data/broken.json", ""),
                  ("diff", "data/users.json", "data/users_v2.json"), ("query", "data/nested.json", "org.teams.0.members.1"),
                  ("inspect", "data/missing.json", "")]

@@ -367,15 +367,20 @@ def files_body(spec, args):
 
 
 def named_files(spec, args):
-    """The files a call names ({path: base64 | None}), as its flow reads them from the user's library: only the file
-    inputs the call gives, each with its content, or None when the library has no such file."""
-    fixtures = spec.get("fixtures") or {}
+    """The files a call names ({path: base64 | None}), as its flow reads them: from the user's library (the spec's
+    fixtures stand in for it) when the path is there, else from the port's built-in samples, else None. Only the
+    file inputs the call gives are named."""
+    fixtures, samples = spec.get("fixtures") or {}, spec.get("samples") or {}
     out = {}
     for name in spec.get("file_inputs") or []:
         path = args.get(name)
         if isinstance(path, str) and path:
-            found = path in fixtures and library_path(path)
-            out[path] = base64.b64encode(fixture_bytes(fixtures[path])).decode() if found else None
+            if path in fixtures and library_path(path):
+                out[path] = base64.b64encode(fixture_bytes(fixtures[path])).decode()
+            elif path in samples:
+                out[path] = base64.b64encode(fixture_bytes(samples[path])).decode()
+            else:
+                out[path] = None
     return out
 
 
@@ -616,6 +621,13 @@ def compile_flow(spec, schema_name, display_name, connector_display, connector_l
     sharepoint = {"apiId": f"/providers/Microsoft.PowerApps/apis/{FILES_API}", "connectionName": FILES_API}
     read_done = ["Succeeded", "Failed", "TimedOut"]
     named = {}
+    samples = spec.get("samples") or {}
+    if file_inputs and samples:
+        # the port's built-in samples, so it can be tried with no files of one's own; a file of the same path in the
+        # library wins
+        actions["Samples"] = {"type": "Compose", "runAfter": {last: ["Succeeded"]} if last else {},
+                              "inputs": {path: base64.b64encode(fixture_bytes(f)).decode() for path, f in samples.items()}}
+        last = "Samples"
     for k in file_inputs:
         value = f"triggerBody()?['{k}']"
         slashed = f"replace(string({value}), '\\', '/')"
@@ -636,9 +648,10 @@ def compile_flow(spec, schema_name, display_name, connector_display, connector_l
             "else": {"actions": {}}}
         # both branches of if() may be evaluated, and a skipped or failed read has no content: go through actions().
         # A read that worked has its bytes in body.$content, except an empty file's, which comes back with no body
+        missing = f"outputs('Samples')?[string({value})]" if samples else "null"
         named[k] = {"path": f"@{value}",
                     "content": (f"@if(equals(actions('{get}')?['status'], 'Succeeded'), "
-                                f"coalesce(actions('{get}')?['outputs']?['body']?['$content'], ''), null)")}
+                                f"coalesce(actions('{get}')?['outputs']?['body']?['$content'], ''), {missing})")}
         last = guard
     args = {k: f"@triggerBody()?['{k}']" for k in spec["inputs"]}
     parameters = {"body/args": args, "body/state": state, "body/now": "@utcNow('yyyy-MM-ddTHH:mm:ssZ')",

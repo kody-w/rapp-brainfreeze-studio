@@ -183,4 +183,27 @@
       }
     }).observe(document.documentElement, { childList: true, subtree: true });
   }
+
+  // The app's example (the host's RAPP_CONFIG.example, {selector: value}) fills the UI's empty fields when it opens,
+  // so a person can try it at once, on the port's built-in samples, with no data of their own.
+  function fillExample() {
+    var example = null;
+    try { example = window.parent && window.parent.RAPP_CONFIG && window.parent.RAPP_CONFIG.example; } catch (e) { return; }
+    if (!example) return;
+    Object.keys(example).forEach(function (selector) {
+      var el = document.querySelector(selector);
+      if (!el) return;
+      var value = String(example[selector]);
+      if (el.tagName === "SELECT") {
+        if (!Array.prototype.some.call(el.options, function (o) { return o.value === value; })) return;
+      } else if (el.value) {
+        return;                                    // never overwrite what's already there
+      }
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fillExample);
+  else fillExample();
 })();

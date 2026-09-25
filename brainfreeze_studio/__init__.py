@@ -357,6 +357,8 @@ def _lay_connector_code(a, spec, files, ws, out, schema_name, name, proofs, env_
         tool_yaml({**spec, "outputs": {"result": ""}}, wf))
     a["profile"], a["note"] = "connector-code", None
     a["flow"] = {"name": spec["flow_name"], "workflowId": wf}
+    if spec.get("ui_example"):
+        a["ui_example"] = spec["ui_example"]
     return True
 
 
@@ -552,6 +554,8 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                                  "defaultValue": str(meta["default"]), "from_setting": key})
             a["profile"], a["note"] = ("materialized" if materialized else "flow"), None
             a["flow"] = {"name": spec["flow_name"], "workflowId": wf}
+            if spec.get("ui_example"):
+                a["ui_example"] = spec["ui_example"]
             if materialized:
                 a["materialized"] = {"cases": report["cases"],
                                      "approximated_inputs": report.get("approximated_inputs") or [],
@@ -612,6 +616,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                            a["profile"] or ("model-run skill (the agent's prompts, answered by the agent's model)"
                                             if a.get("llm") else "reasoning-only skill")),
                     **({"flow": a["flow"]} if a.get("flow") else {}),
+                    **({"ui_example": a["ui_example"]} if a.get("ui_example") else {}),
                     **({"materialized": a["materialized"]} if a.get("materialized") else {}),
                     **({"note": a["note"]} if a["note"] else {})} for a in agents],
         "memories": len(memories),
