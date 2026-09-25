@@ -22,8 +22,8 @@ Preview (24 Sep 2026).
 |---|---|---|---|
 | Brainstem runtime (16 rows) | 10 | 4 | 2 |
 | agent.py (10 rows) | 6 | 1 | 3 |
-| Frozen-brainstem extras (6 rows) | 4 | 0 | 2 |
-| **Total (32 rows)** | **20** | **5** | **7** |
+| Frozen-brainstem extras (7 rows) | 5 | 0 | 2 |
+| **Total (33 rows)** | **21** | **5** | **7** |
 
 **How agents keep working inside Copilot Studio:** an agent.py doesn't run in Studio, but its logic can be
 **translated** into Power Platform parts, the way the proven HackerNews and memory agents were: a custom
@@ -77,6 +77,7 @@ An outside MCP host is only the fallback, for agents Power Platform can't expres
 | 4 | Memory in the egg | `memory-seed.json` (normalized rows) | **gap** | Exported, but not yet written into Dataverse. Seeding would use the same Add-row shape as the memory profile. |
 | 5 | Proof of parity (brainstem vs Studio, same prompts) | brainfreeze `replay` + `prove-usecase.mjs` side by side | **gap** | Both halves exist; the combined report doesn't. Running it needs an Entra app with `CopilotStudio.Copilots.Invoke`. |
 | 6 | Per-agent parity (translation vs real Python) | `parity/<Flow>.json`: every case, both outputs | **built** | The gate for every translation: `build --translations` lays a flow only when its proof passes. |
+| 7 | Deploy as the signed-in user, from anywhere | `brainfreeze_studio.deploy`: Dataverse Web API only (no pac, az or Node), with the user's own delegated token; `examples/azure-function` | **proven** / **built** | The same calls pac makes: `bots` and `botcomponents` rows and the `PvaPublish` message. Idempotent, and it refuses app-only tokens and classic agents (`tests/test_deploy.py`). On 24 Sep 2026, one egg deployed from a laptop and from an Azure Function, as the same signed-in user, gave identical agents field by field (7 components, flows active, published), and re-deploys changed nothing. The browser sign-in (device code) issues codes; a person completing it in the page wasn't run. |
 
 ## What would move the score
 

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploy a brainstem to Copilot Studio</title>
+<style>
+  body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; color: #1b1b1b; }
+  label { display: block; margin-top: .9rem; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: .5rem; font: inherit; }
+  button { margin-top: 1.2rem; padding: .6rem 1.1rem; font: inherit; cursor: pointer; }
+  .code { font: 600 1.6rem ui-monospace, monospace; letter-spacing: .1em; }
+  pre { background: #f4f4f4; padding: .8rem; white-space: pre-wrap; font-size: 13px; }
+  .hint { color: #555; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>Deploy a brainstem to Copilot Studio</h1>
+<p class="hint">You sign in with your own account. The agent is created with your rights, in an environment you can
+make agents in. This page never stores your sign-in.</p>
+
+<label for="env">Environment URL</label>
+<input id="env" placeholder="https://yourorg.crm.dynamics.com/">
+<button id="signin">Sign in with your account</button>
+<div id="auth"></div>
+
+<label for="name">Agent name</label>
+<input id="name" placeholder="My Desk">
+<label for="egg">Brainstem egg (.egg)</label>
+<input id="egg" type="file" accept=".egg">
+<label for="hn">Hacker News connector (optional)</label>
+<input id="hn" placeholder="shared_new-5frapp-20hacker-20news-...">
+<button id="deploy" disabled>Deploy</button>
+<pre id="out"></pre>
+
+<script>
+let token = null;
+const $ = (id) => document.getElementById(id);
+const post = (path, body, headers = {}) =>
+  fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) })
+    .then(async (r) => ({ status: r.status, body: await r.json() }));
+
+$("signin").onclick = async () => {
+  const r = await post("signin", { environment: $("env").value });
+  if (r.status !== 200) { $("auth").textContent = r.body.error; return; }
+  const { device_code, user_code, verification_uri, interval } = r.body;
+  const link = document.createElement("a");
+  link.href = /^https:\/\/([a-z]+\.)?microsoft(online)?\.com\//.test(verification_uri) ? verification_uri : "https://microsoft.com/devicelogin";
+  link.target = "_blank"; link.rel = "noopener"; link.textContent = link.href;
+  const code = document.createElement("p"); code.className = "code"; code.textContent = user_code;
+  const wait = document.createElement("p"); wait.className = "hint"; wait.textContent = "Waiting for you to sign in…";
+  const open = document.createElement("p"); open.append("Open ", link, " and enter");
+  $("auth").replaceChildren(open, code, wait);
+  const poll = async () => {
+    const p = await post("signin/poll", { device_code });
+    if (p.body.status === "ok") {
+      token = p.body.access_token;
+      $("auth").textContent = `Signed in as ${p.body.account} for ${p.body.environment}.`;
+      $("deploy").disabled = false;
+    } else if (p.body.status === "pending") {
+      setTimeout(poll, (interval || 5) * 1000);
+    } else {
+      $("auth").textContent = p.body.error;
+    }
+  };
+  setTimeout(poll, (interval || 5) * 1000);
+};
+
+$("deploy").onclick = async () => {
+  const file = $("egg").files[0];
+  if (!file) { $("out").textContent = "Pick an egg first."; return; }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = ""; for (const b of bytes) bin += String.fromCharCode(b);
+  $("deploy").disabled = true;
+  $("out").textContent = "Deploying… this takes a minute or two.";
+  const r = await post("deploy", { environment: $("env").value, name: $("name").value, egg: btoa(bin),
+                                   hnApiName: $("hn").value || null }, { Authorization: `Bearer ${token}` });
+  $("deploy").disabled = false;
+  const b = r.body;
+  $("out").textContent = (b.ok ? `Deployed. Open it: ${b.result.makerUrl}\n\n` : `Failed: ${b.error}\n\n`) + (b.log || []).join("\n");
+};
+</script>
+</body>
+</html>

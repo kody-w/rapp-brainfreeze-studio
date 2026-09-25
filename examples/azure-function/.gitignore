@@ -1,0 +1,5 @@
+local.settings.json
+brainfreeze_studio/
+sdk/
+.python_packages/
+__pycache__/

@@ -1,0 +1,6 @@
+local.settings.json
+__pycache__/
+*.pyc
+.venv/
+publish.sh
+README.md

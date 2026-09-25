@@ -96,10 +96,27 @@ network): `python3 -m brainfreeze_studio serve <egg>` serves the egg's agents ov
 engine, running the real agent.py. It needs a host outside Copilot Studio, which is why it's the fallback,
 not the default. Build with `--mcp-connector-id` to route untranslated agents to it.
 
+## Deploy as the person signed in
+
+`brainfreeze_studio.deploy` puts a built workspace into Copilot Studio with nothing but a Dataverse token. That
+token is the user's own delegated one, so the agent lands with that person's rights, in any environment they can
+make agents in. It needs no pac, az or Node, and no service account. Each step is a Dataverse Web API call, the
+same calls `pac copilot push` and `publish` make. It is idempotent and refuses app-only tokens.
+
+```python
+from brainfreeze_studio.deploy import deploy
+deploy("out/workspace", "https://yourorg.crm.dynamics.com/", get_token=lambda: user_token)
+```
+
+[`examples/azure-function`](examples/azure-function) runs build and deploy in an Azure Function. The user signs in
+on a small page with their own account (device code, delegated Dataverse access only), picks an egg and deploys.
+The Function stores no tokens. Deployed from a laptop and from the Function as the same user, one egg gave
+identical agents.
+
 ## How close is it?
 
 [MAPPING.md](MAPPING.md) maps every brainstem and agent.py concept to its Copilot Studio harness counterpart,
-with a status and evidence per row. Today: **20 of 32** proven or built, 5 approximated, 7 gaps. The translated
+with a status and evidence per row. Today: **21 of 33** proven or built, 5 approximated, 7 gaps. The translated
 InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the half-cent midpoint, and
 so have the materialized AIBAST flows.
 Next: connector translations for API-calling agents.
