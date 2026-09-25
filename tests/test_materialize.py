@@ -4,6 +4,7 @@ import hashlib
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -199,6 +200,95 @@ class MaterializeTests(unittest.TestCase):
         flow["properties"]["definition"]["actions"]["Text"]["inputs"] = "@concat('" + "x" * 9000 + "')"
         with self.assertRaises(ValueError):
             flows._within_limits(flow)
+
+
+# An agent over a dataset it loads by path (the shape of an agent that reads its site's exports): the SKUs come from
+# the data, not the code, and each answer is also written back into the data folder as a report.
+CATALOG = '''import csv, os
+from basic_agent import BasicAgent
+DATA = os.environ.get("CATALOG_DIR", "/nonexistent")
+
+
+class CatalogAgent(BasicAgent):
+    def __init__(self):
+        self.metadata = {"name": "Catalog", "description": "Looks up a SKU in the catalog export.",
+                         "parameters": {"type": "object", "properties": {"sku": {"type": "string"}}, "required": []}}
+        super().__init__(name="Catalog", metadata=self.metadata)
+
+    def perform(self, sku="", **kw):
+        rows = {r["sku"]: r for r in csv.DictReader(open(os.path.join(DATA, "catalog.csv")))}
+        if not sku:
+            text = f"{len(rows)} SKUs in the {os.environ.get('CATALOG_MODE', '?')} catalog"
+        elif sku in rows:
+            text = f"{sku}: {rows[sku]['name']} at ${float(rows[sku]['price']):,.2f}"
+        else:
+            text = f"no SKU {sku}"
+        os.makedirs(os.path.join(DATA, "reports"), exist_ok=True)
+        open(os.path.join(DATA, "reports", "last.txt"), "w").write(text)
+        return text
+'''
+CATALOG_AGENT = TMP / "catalog_agent.py"
+CATALOG_AGENT.write_text(CATALOG)
+
+
+def catalog_folder(rows=(("CAB-288", "Fiber cable, 288 count", "4.10"), ("HH-1730", "Handhole 17x30", "212.00"))):
+    folder = Path(tempfile.mkdtemp(prefix="bf-catalog-", dir=TMP))
+    (folder / "catalog.csv").write_text("sku,name,price\n" + "".join(",".join(r) + "\n" for r in rows))
+    return folder
+
+
+class PinnedDataTests(unittest.TestCase):
+    def test_an_agent_that_reads_files_is_refused_unless_its_data_is_pinned(self):
+        folder = catalog_folder()
+        spec, report = materialize(CATALOG_AGENT, BASIC, env={"CATALOG_DIR": str(folder)})
+        self.assertIsNone(spec)
+        self.assertIn("files", report["effects"])
+
+    def test_pinned_data_is_digested_copied_and_proven_on_that_exact_data(self):
+        folder = catalog_folder()
+        before = sorted(p.name for p in folder.rglob("*"))
+        spec, report = materialize(CATALOG_AGENT, BASIC, env={"CATALOG_MODE": "export"},
+                                   data={"CATALOG_DIR": folder}, values={"sku": ["CAB-288", "HH-1730"]})
+        self.assertIsNotNone(spec, report.get("reasons"))
+        self.assertEqual(sorted(p.name for p in folder.rglob("*")), before)          # it wrote into its copy only
+        self.assertEqual(spec["data"]["CATALOG_DIR"]["files"], 1)
+        self.assertEqual(spec["env"], {"CATALOG_MODE": "export"})
+        keying = {k["input"]: k for k in spec["keying"]}
+        self.assertEqual(sorted(keying["sku"]["values"]), ["CAB-288", "HH-1730"])
+        proof = prove_materialized(spec, CATALOG_AGENT, BASIC)
+        self.assertTrue(proof["parity"], proof["mismatches"][:2])
+        flow = compile_flow(spec, "rapp_Test")
+        self.assertEqual(run_flow(flow, {"sku": "HH-1730"})["result"], "HH-1730: Handhole 17x30 at $212.00")
+        self.assertEqual(run_flow(flow, {})["result"], "2 SKUs in the export catalog")
+        self.assertEqual(run_flow(flow, {"sku": "XYZ"})["result"], "no SKU XYZ")
+
+    def test_changed_or_missing_data_is_refused_and_an_identical_copy_elsewhere_is_accepted(self):
+        folder = catalog_folder()
+        spec, _ = materialize(CATALOG_AGENT, BASIC, data={"CATALOG_DIR": folder}, values={"sku": ["CAB-288", "HH-1730"]})
+        moved = catalog_folder()                                  # the same bytes in another place
+        with unittest.mock.patch.dict("os.environ", {"BFS_DATA_CATALOG_DIR": str(moved)}):
+            self.assertTrue(prove_materialized(spec, CATALOG_AGENT, BASIC)["parity"])
+        (folder / "catalog.csv").write_text((folder / "catalog.csv").read_text().replace("212.00", "199.00"))
+        refused = prove_materialized(spec, CATALOG_AGENT, BASIC)
+        self.assertFalse(refused["parity"])
+        self.assertIn("changed since it was materialized", refused["reason"])
+        gone = dict(spec, data={"CATALOG_DIR": dict(spec["data"]["CATALOG_DIR"], path=str(TMP / "nowhere"))})
+        self.assertIn("isn't here", prove_materialized(gone, CATALOG_AGENT, BASIC)["reason"])
+
+    def test_an_agent_with_no_inputs_is_not_sampled_over_and_over(self):
+        folder = catalog_folder()
+        agent = TMP / "catalog_count_agent.py"
+        agent.write_text(CATALOG.replace('"properties": {"sku": {"type": "string"}}', '"properties": {}'))
+        spec, report = materialize(agent, BASIC, data={"CATALOG_DIR": folder})
+        self.assertIsNotNone(spec, report.get("reasons"))
+        self.assertEqual(spec["materialized_with"]["unique_outputs"], 1)
+        self.assertLess(report["runner_calls"], 60)          # one sample, not 600 copies of the same call
+
+    def test_without_its_values_an_id_from_the_data_would_only_look_unknown(self):
+        folder = catalog_folder()
+        spec, _ = materialize(CATALOG_AGENT, BASIC, data={"CATALOG_DIR": folder})
+        keying = {k["input"]: k for k in spec["keying"]}
+        self.assertNotIn("HH-1730", keying["sku"].get("values") or [])  # why values= exists: name them from the data
 
 
 if __name__ == "__main__":

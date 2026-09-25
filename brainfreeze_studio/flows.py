@@ -28,6 +28,7 @@ Power Automate, the proof report says the result still needs one live confirmati
 import base64
 import hashlib
 import json
+import os
 import math
 import re
 import subprocess
@@ -605,8 +606,16 @@ def tool_description(spec):
         k = keying[name]
         if k.get("rule") in ("exact", "ci", "canonical") and k.get("values") and not k.get("boolean"):
             values = [str(v) for v in k["values"]]
-            parts.append(f"Set `{name}` to exactly one of: {', '.join(values)}." if name == primary
-                         else f"`{name}` values: {', '.join(values[:15])}{', …' if len(values) > 15 else ''}.")
+            if name == primary:
+                parts.append(f"Set `{name}` to exactly one of: {', '.join(values)}.")
+                continue
+            # the input's own words, since the orchestrator doesn't read input descriptions: without them an optional
+            # scope ("Optional project to scope to") reads as a list of values to call the tool with one by one
+            own = re.sub(r"\s*Values: .*$", "", ((spec.get("inputs") or {}).get(name) or {}).get("description", ""))
+            own = _clip(own.strip().rstrip("."), 160)
+            optional = name not in (spec.get("required") or []) and "optional" not in own.lower()
+            parts.append(f"`{name}`" + (f": {own}" if own else "") + (" (optional)" if optional else "")
+                         + f"; values: {', '.join(values[:15])}{', …' if len(values) > 15 else ''}.")
     suffix = ""
     for part in parts:                     # the operation list first; later lists only while they fit
         if len(suffix) + len(part) + 1 <= TOOL_DESCRIPTION_LIMIT // 2 or not suffix:
@@ -676,9 +685,32 @@ for line in sys.stdin:
 """
 
 
+def pinned_data(spec):
+    """The folders a materialized spec's data was pinned to, checked: ({variable: folder}, None), or (None, why).
+    A folder comes from BFS_DATA_<variable> when set, else the path the spec recorded; its digest must match."""
+    from .materialize import dataset_digest
+    found = {}
+    for name, meta in (spec.get("data") or {}).items():
+        folder = os.environ.get(f"BFS_DATA_{name}") or meta.get("path")
+        if not folder or not os.path.isdir(folder):
+            return None, f"its pinned dataset {name} isn't here (set BFS_DATA_{name} to the folder)"
+        digest = dataset_digest(folder)
+        if digest["sha256"] != meta["sha256"]:
+            return None, (f"its dataset {name} changed since it was materialized ({meta['files']} files, "
+                          f"{meta['sha256'][:12]}; now {digest['files']}, {digest['sha256'][:12]}): materialize again")
+        found[name] = folder
+    return found, None
+
+
 def prove_materialized(spec, agent_file, basic_file, schema_name=None):
-    """Every vector through the real agent.py (sandboxed, same frozen clock) and through the compiled flow."""
+    """Every vector through the real agent.py (sandboxed, same frozen clock) and through the compiled flow. A spec
+    materialized over pinned data is proven on that exact data, or refused."""
     from .materialize import CLOCKS, Runner, agent_python
+    data, why = pinned_data(spec)
+    if why:
+        return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": 0, "passed": 0, "parity": False,
+                "mode": "materialized", "reason": why, "mismatches": [], "blocked_operations": {},
+                "approximated_inputs": []}
     flow = compile_materialized(spec, schema_name)
     blocked = set(spec.get("blocked_operations") or {})
     primary = spec.get("primary")
@@ -687,7 +719,8 @@ def prove_materialized(spec, agent_file, basic_file, schema_name=None):
     first = (spec.get("materialized_with") or {}).get("clock") or CLOCKS[0]
     clocks = [first] + ([c for c in CLOCKS if c != first] if spec.get("clock_formats") else [])
     runner = Runner(agent_file, basic_file, spec.get("class") or "",
-                    python=agent_python((spec.get("materialized_with") or {}).get("python")))
+                    python=agent_python((spec.get("materialized_with") or {}).get("python")),
+                    env=spec.get("env"), data=data)
     results = []
     for clock in clocks:
         for vec, py in zip(vectors, runner.run(vectors, clock=clock)):
@@ -699,6 +732,7 @@ def prove_materialized(spec, agent_file, basic_file, schema_name=None):
     passed = sum(r["match"] for r in results)
     return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": len(results), "passed": passed,
             "clocks": clocks, "python": runner.python_version(),
+            **({"data": {k: v["sha256"] for k, v in spec["data"].items()}} if spec.get("data") else {}),
             "parity": passed == len(results) and len(results) > 0, "mode": "materialized",
             "blocked_operations": spec.get("blocked_operations") or {},
             "approximated_inputs": [k["input"] for k in spec["keying"] if k.get("approximated")],

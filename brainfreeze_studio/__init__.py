@@ -531,12 +531,18 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                 if materialized:
                     basic_file = Path(tmp) / "basic_agent.py"
                     basic_file.write_bytes(basic_source)
+                    # the egg's other agents beside it, as in its brainstem: an agent may load a sibling
+                    for other, octets in files.items():
+                        if other.startswith("agents/") and other.count("/") == 1 and other.endswith(".py") \
+                                and not (Path(tmp) / Path(other).name).exists():
+                            (Path(tmp) / Path(other).name).write_bytes(octets)
                 report = prove(spec, agent_file, schema_name, basic_file=basic_file)
             proofs[a["contract"]["name"]] = report
             (out / "parity" / f"{spec['flow_name']}.json").write_text(json.dumps(
                 {k: v for k, v in report.items() if k not in ("flow_json", "_all")}, indent=2) + "\n")
             if not report["parity"]:
-                a["note"] = (f"translation failed parity ({report['passed']}/{report['cases']} cases match); "
+                a["note"] = (f"translation not proven: {report['reason']}" if report.get("reason") else
+                             f"translation failed parity ({report['passed']}/{report['cases']} cases match); "
                              f"see parity/{spec['flow_name']}.json")
                 continue
             wf = workflow_id_for(schema_name, spec["flow_name"])

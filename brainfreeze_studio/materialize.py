@@ -27,6 +27,14 @@ Inputs that drive computation (numbers that change the result, free text that is
 searched), a clock that changes the output, output that depends on call order, and hash-seed
 nondeterminism are reported, never materialized: they need a hand translation (a translation spec
 in expressions) or the MCP fallback.
+
+Pinned data. An agent that reads a dataset (files it loads by path) is a function of its arguments and that
+dataset, so ``data={"ENV_VAR": folder}`` pins it: the folder's digest goes into the spec, the agent runs on a
+private copy (the variable points at it, and anything it writes lands there), and every later proof refuses a
+folder whose digest differs. The flow then serves the dataset as it was; new data means materializing again.
+``values={"input": [...]}`` names an input's values when they come from the data rather than the code (a
+project or item id), so every one is tried; without them such an input would look unknown and be proven only
+on probes. ``env`` sets fixed variables (a mode switch).
 """
 import ast
 import base64
@@ -39,6 +47,8 @@ import shutil
 import string
 import subprocess
 import sys
+import tempfile
+import weakref
 from pathlib import Path
 
 ABSENT = "\u2205"            # ∅: the input was omitted
@@ -258,6 +268,7 @@ RUNNER = r'''
 import builtins, datetime as _dt, importlib.abc, importlib.util, io, json, os, socket, subprocess, sys, time as _time, types
 
 agent_file, basic_file, clock_iso, class_name = sys.argv[1:5]
+_PINNED = json.loads(sys.argv[5]) if len(sys.argv) > 5 else []
 
 # What the agent reaches beyond its arguments. A table can only stand in for a function of the arguments, so an agent
 # that reads files, calls the network, calls an LLM or starts processes is refused (and the report says which).
@@ -272,11 +283,20 @@ socket.socket.connect_ex = _blocked
 socket.create_connection = _blocked
 socket.getaddrinfo = _blocked
 
+# pinned data folders are part of the agent's input, and with them the interpreter's own library files (a
+# library reading its bundled template) are too; nothing else is
+_ROOTS = [os.path.realpath(p) for p in _PINNED]
+if _ROOTS:
+    import sysconfig
+    _ROOTS += sorted({os.path.realpath(p) for p in [sys.prefix, sys.base_prefix]
+                      + [sysconfig.get_paths().get(k) for k in ("stdlib", "purelib", "platlib")] if p})
+
 def _is_own(path):
     try:
-        return os.path.realpath(os.fspath(path)) in _OWN
+        real = os.path.realpath(os.fspath(path))
     except TypeError:
         return True
+    return real in _OWN or any(real == r or real.startswith(r + os.sep) for r in _ROOTS)
 
 _real_open = builtins.open
 def _open(file, mode="r", *a, **k):
@@ -424,15 +444,36 @@ EFFECTS = {"files": "reads or writes files (SharePoint plus connector code inste
            "host": "needs services its brainstem host provides (the MCP fallback instead)"}
 
 
-class Runner:
-    """Runs one agent file's perform() in a sandboxed subprocess, a batch of cases at a time."""
+def dataset_digest(folder):
+    """What pins a dataset: the SHA-256 over every file's relative path and bytes, with the count and size."""
+    root = Path(folder)
+    h, files, size = hashlib.sha256(), 0, 0
+    for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        data = f.read_bytes()
+        h.update(f.relative_to(root).as_posix().encode("utf-8") + b"\0" + hashlib.sha256(data).digest())
+        files, size = files + 1, size + len(data)
+    return {"sha256": h.hexdigest(), "files": files, "bytes": size}
 
-    def __init__(self, agent_file, basic_file, class_name="", python=None, timeout=600):
+
+class Runner:
+    """Runs one agent file's perform() in a sandboxed subprocess, a batch of cases at a time. `env` sets fixed
+    variables; `data` ({variable: folder}) gives the agent a private copy of each pinned folder."""
+
+    def __init__(self, agent_file, basic_file, class_name="", python=None, timeout=600, env=None, data=None):
         self.agent_file, self.basic_file = str(agent_file), str(basic_file)
         self.class_name, self.python, self.timeout = class_name or "", python or sys.executable, timeout
         self.calls = 0
         self._version = None
         self.effects = set()     # what perform() reached beyond its arguments, over every call
+        self.env, self.pinned = {k: str(v) for k, v in (env or {}).items()}, []
+        if data:
+            work = tempfile.mkdtemp(prefix="bfs-pinned-")
+            weakref.finalize(self, shutil.rmtree, work, True)
+            for name, folder in data.items():
+                copy = Path(work) / re.sub(r"[^A-Za-z0-9_]", "_", name)
+                shutil.copytree(folder, copy)
+                self.env[name] = str(copy)
+                self.pinned.append(str(copy))
 
     def python_version(self):
         if self._version is None:
@@ -441,10 +482,13 @@ class Runner:
         return self._version
 
     def _exchange(self, requests, clock=CLOCKS[0], hashseed="0"):
-        env = {"PYTHONHASHSEED": str(hashseed), "PATH": "/usr/bin:/bin", "HOME": str(Path(self.agent_file).parent)}
+        env = {**self.env, "PYTHONHASHSEED": str(hashseed), "PATH": "/usr/bin:/bin",
+               "HOME": str(Path(self.agent_file).parent)}
         payload = "".join(json.dumps(r) + "\n" for r in requests)
-        proc = subprocess.run([self.python, "-c", RUNNER, self.agent_file, self.basic_file, clock, self.class_name],
-                              input=payload, capture_output=True, text=True, timeout=self.timeout, env=env)
+        argv = [self.python, "-c", RUNNER, self.agent_file, self.basic_file, clock, self.class_name]
+        if self.pinned:
+            argv.append(json.dumps(self.pinned))
+        proc = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=self.timeout, env=env)
         lines = [l for l in proc.stdout.splitlines() if l.strip()]
         if proc.returncode != 0 or len(lines) != len(requests):
             raise MaterializeError(f"{Path(self.agent_file).name}: runner failed "
@@ -533,8 +577,9 @@ def _norm(rule, raw):
 class Discovery:
     """What each input of one agent does, learned from the real Python."""
 
-    def __init__(self, runner, source):
+    def __init__(self, runner, source, values=None):
         self.r, self.source = runner, source
+        self.values = {k: [str(v) for v in vs] for k, vs in (values or {}).items()}
         self.contract = runner.contract()
         params = self.contract.get("parameters") or {}
         self.props = params.get("properties") or {}
@@ -616,7 +661,8 @@ class Discovery:
         s = sentinel(name)
         enum = [str(v) for v in schema.get("enum") or []]
         table = {}
-        first = list(dict.fromkeys([None, s] + enum + self.constants + _random_strings(name) + ["", "   "]))
+        first = list(dict.fromkeys([None, s] + enum + self.values.get(name, []) + self.constants
+                                   + _random_strings(name) + ["", "   "]))
         self._fill(name, contexts, first, table)
         n = range(len(contexts))
         firsts = [v for v in first[2:] if any(table[(ci, v)] != table[(ci, s)].replace(s, v) for ci in n)]
@@ -790,7 +836,8 @@ def _sub(out, keyed, states, args):
 
 
 def materialize(agent_file, basic_file, *, class_name="", flow_name=None, component=None, python=None,
-                check_clock=True, check_order=True, samples=600, allow_hash_variation=False, hand=None):
+                check_clock=True, check_order=True, samples=600, allow_hash_variation=False, hand=None,
+                env=None, data=None, values=None, timeout=600):
     """Learn, run and verify one agent. Returns (spec, report); spec is None when it cannot be materialized.
 
     The table is per operation: for each state of the primary input (the required selector, usually
@@ -805,8 +852,10 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
         raise MaterializeError(f"{agent_file.name}: its hand translation was written for a different source "
                                f"({hand['source_sha256'][:12]}, now {source_sha[:12]})")
     hand_ops = hand.get("operations") or {}
-    runner = Runner(agent_file, basic_file, class_name, python)
-    disc = Discovery(runner, source).learn()
+    pinned = {name: {**dataset_digest(folder), "path": str(Path(folder).expanduser().resolve())}
+              for name, folder in (data or {}).items()}
+    runner = Runner(agent_file, basic_file, class_name, python, timeout=timeout, env=env, data=data)
+    disc = Discovery(runner, source, values=values).learn()
     c = disc.contract
     report = {"agent": c.get("name"), "class": c.get("class"), "file": agent_file.name,
               "inputs": {n: {k: v for k, v in i.items() if k in ("kind", "rule", "why", "canon", "dict", "echo",
@@ -884,7 +933,9 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
             rows = {"|".join([pst] + sts): o for (sts, _), o in zip(combos, outs)}
             # verify on random samples over every keyed input (not just the relevant ones)
             sample_cases, sample_keys = [], []
-            for _ in range(max(1, samples // max(1, len(pstates)))):
+            # with no other input to vary every sample is the same call: one is enough (determinism across repeated
+            # calls, call order and hash seeds is checked on its own)
+            for _ in range(max(1, samples // max(1, len(pstates))) if rest else 1):
                 asg, key_states, subst = {}, [], []
                 for i in rest:
                     st, v = rng.choice(full_states(i))
@@ -1052,6 +1103,9 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
         "hand_operations": {op: h.get("why", "") for op, h in hand_ops.items() if ops.get(op, {}).get("hand")},
         "clock_formats": clock_formats, "caveats": caveats,
         "source_sha256": source_sha,
+        **({"env": {k: str(v) for k, v in env.items()}} if env else {}),
+        **({"data": pinned} if pinned else {}),
+        **({"values": {k: len(v) for k, v in values.items()}} if values else {}),
         "materialized_with": {"clock": CLOCKS[0], "python": runner.python_version(),
                               "checked_clock": CLOCKS[1] if check_clock else None,
                               "checked_clocks": list(CLOCKS[1:]) if check_clock else [],
