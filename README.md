@@ -1,6 +1,7 @@
 # brainfreeze-studio
 
-Turn a frozen RAPP brainstem into a Copilot Studio agent.
+Turn a frozen RAPP brainstem into a Copilot Studio agent, and a RAPP Store rapplication (an agent with its UI) into a
+Copilot Studio agent plus a Power Apps code app.
 
 [brainfreeze](https://github.com/kody-w/rapp-brainfreeze) freezes a brainstem into a rapp/1 organism egg: its soul,
 agents and memory, plus a session egg for the conversation. brainfreeze-studio turns that egg into a **GitHub
@@ -54,7 +55,9 @@ the proven HackerNews and memory agents were, and nothing then lives outside Stu
 |---|---|
 | Rules or math | an **agent flow** (`WorkflowTool`) |
 | Stored data | **Dataverse** tools |
-| HTTP API calls | a **custom connector** (+ flow) |
+| HTTP API calls | a **custom connector** (+ flow); its code can make the calls itself |
+| Keeps state between calls (files it writes, the RAPP workspace contract) | **connector code** whose flow keeps each file as a Dataverse note |
+| Reads the user's files | **connector code** whose flow reads each named file from a SharePoint folder |
 | Only reasoning or writing | a **skill** |
 
 A translation is a small spec (`translations/*.json`) written in Power Automate's own expression language.
@@ -93,10 +96,60 @@ The AIBAST Copilot applied this to the 72 published agents of the AIBAST agents 
 including hand-translated operations and dates from the flow's clock, returned the real Python's output byte
 for byte. The workshop engine, which keeps state and runs `pac`, stays a reasoning-only skill.
 
+**Connector code, for logic too heavy for flow expressions.** A port of the agent's logic to C#
+(`translations/<agent>.csx`, with a spec whose `"mode"` is `"connector-code"`) runs as a custom connector's code,
+built on `PyCompat` (Python's JSON, float formatting, rounding, string and error semantics, linked into every
+script). The proof compiles the port locally with the .NET SDK and runs the same calls through it and through the
+agent's real Python, under the engine's Python version, with the same clock, ids, workspace files, file bytes and
+recorded HTTP responses. Any difference refuses it. The flow around the code does what the platform does best:
+
+- **State** (Thoughtbox): read the agent's workspace files from Dataverse notes, run the code, create or update the
+  notes it wrote. 40/40 offline; live, append, list, search and stats matched the Python, and the note was created and then updated.
+- **Network** (the rapp-god forum): the code makes the agent's own HTTP calls. 29/29 on recorded responses; live, it
+  called GitHub and the forum's host and matched the Python on the same endpoints.
+- **Files** (JSON Doctor): each path the call names is read from the SharePoint folder in the RAPP Files Site and
+  RAPP Files Folder environment variables (a relative path inside the folder; anything else is never read), and the code gets the bytes.
+  60/60 offline; live, 11/11 flow runs matched the Python on the uploaded bytes, and the harness agent, asked in
+  plain words, called the tool with the right arguments and returned the proven output.
+
+Ports are written by hand today; the gate is what makes them safe to ship.
+
 **Fallback for agents Power Platform can't express** (heavy compute, special libraries, a private
 network): `python3 -m brainfreeze_studio serve <egg>` serves the egg's agents over MCP on their pinned
 engine, running the real agent.py. It needs a host outside Copilot Studio, which is why it's the fallback,
 not the default. Build with `--mcp-connector-id` to route untranslated agents to it.
+
+## Rapplications: an agent with its UI
+
+```bash
+python3 -m brainfreeze_studio codeapp-host             # optional: builds the code app host now (needs node and npm)
+python3 -m brainfreeze_studio rapplication @rapp/json_doctor --translations translations/ --out out/ \
+    --environment https://yourorg.crm.dynamics.com/ --deploy     # signs in with az; omit --deploy to stay offline
+```
+
+A RAPP Store rapplication (`manifest.json`, `singleton/<id>_agent.py`, `ui/index.html`, each file checked against
+the catalog's SHA-256), or a rapp/1 `rapplication` egg, builds like a one-agent brainstem, and its UI becomes a
+**Power Apps code app**:
+
+- **The agent** goes through the same build: a proven flow, connector code, or a reasoning skill.
+- **The UI** runs unchanged in a same-origin frame inside a small host app. Its inline scripts and `on*=`
+  attributes are rewritten to pass the code app content security policy (literal-argument handlers made at run
+  time too, without `eval`), CDN files are vendored with their SHA-256, and what the policy will block anyway
+  (remote `fetch`, `eval`, `document.write`) is reported per app.
+- **Its calls to the agent** (`fetch('/chat')`, the `rapp-cartridge/1.0` messages): "Use the X tool with k=v" runs
+  X's flow through a Power Apps copy of it (same actions, Power Apps trigger), so the app gets the proven output.
+  Anything else goes to the Copilot Studio agent through a small chat flow on the agentic runtime
+  (`ExecuteCopilotAsyncV2OnAgenticRuntime`), because the Copilot Studio connector's plain Execute Agent refuses
+  GitHub Copilot harness agents.
+- **Publishing** is pac-free, as the signed-in user: the Power Apps resource provider's storage, create or update
+  (with a lease) and publish calls, with a token for `https://service.powerapps.com/`, a permission users can
+  consent to themselves. The environment needs code apps turned on.
+
+Live in a dev environment (25 Sep 2026): the Invoice Router example's UI got its flow's exact outputs in the Power
+Apps player; AgentTeam and the Vibe Coding Loop rendered their agents' answers; BookFactory deployed through the
+Azure Function as a background job; Thoughtbox, the rapp-god forum and JSON Doctor run their logic as connector
+code. Headless, `tests/test_codeapp_browser.py` plays packaged apps in a stand-in player under the same policy,
+and the JSON Doctor app runs its flow's own expressions and the real compiled C# against the Python.
 
 ## Deploy as the person signed in
 
@@ -110,6 +163,13 @@ from brainfreeze_studio.deploy import deploy
 deploy("out/workspace", "https://yourorg.crm.dynamics.com/", get_token=lambda: user_token)
 ```
 
+With a Power Apps token too (`get_powerapps_token`), a flow's Microsoft connector (SharePoint, Dataverse, ...) is
+bound to a connection of the user's own. When they have none and an API Hub token is given
+(`get_apihub_token`, `https://apihub.azure.com`), the deploy makes one with their sign-in alone, through the
+connection's first-party login (API Hub exchanges the token on their behalf; no browser, no consent page). Agents
+that read files find them in `files_site` / `files_folder`: by default the environment's RAPP Files Site, else the
+build's, else the tenant's root site found through that connection, and `/Shared Documents`.
+
 [`examples/azure-function`](examples/azure-function) runs build and deploy in an Azure Function. The user signs in
 on a small page with their own account (device code, delegated Dataverse access only), picks one of their
 environments (listed by the Dataverse Global Discovery Service) and an egg, and deploys.
@@ -118,16 +178,19 @@ laptop and from the Function as the same user, one egg gave identical agents. Ag
 request, such as libraries of tens of flows, deploy as background jobs: `POST /api/jobs` returns at once, a queue
 trigger runs the build and deploy for up to an hour, and `GET /api/jobs/{id}` shows the progress to the user who
 started it. Dataverse checks the user's token before the Function does any work, and translations, which run the
-egg's code there, need a list of the tenants it serves.
+egg's code there, need a list of the tenants it serves. A job can also deploy a RAPP Store rapplication
+(`{rapplication: "@publisher/id"}`): its agent, the flows its app calls and its code app, published with the
+user's own Power Apps token.
 
 ## How close is it?
 
 [MAPPING.md](MAPPING.md) maps every brainstem, agent.py and rapplication concept to its Copilot Studio and Power
-Platform counterpart, with a status and evidence per row. Today: **21 of 43** proven or built, 6 approximated,
-16 gaps. The translated InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the
-half-cent midpoint, and so have the materialized AIBAST flows.
-Next: connector, state and file translations (custom connectors, Dataverse notes, SharePoint), then rapplications:
-a RAPP Store agent with its UI, as a Copilot Studio agent plus a Power Apps code app.
+Platform counterpart, with a status and evidence per row. Today: **31 of 43** proven or built, 6 approximated,
+6 gaps. The translated InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the
+half-cent midpoint, and so have the materialized AIBAST flows, the connector-code ports (state, network, files)
+and the rapplications' code apps.
+Next: the side-by-side parity report (the same prompts to the brainstem and the Studio agent), parent + child
+agents, memory seeding, and connectors that need an API key.
 
 ## Tests
 
@@ -138,7 +201,9 @@ HARNESS_SDK_DIR=../copilot-harness-sdk GRAIL_AGENTS_DIR=~/.brainstem/src/rapp_br
 ```
 
 The parity test runs the SDK's own `scanWorkspace` and `expectedComponents` on a built workspace, and checks
-that both compute the same agent-flow id.
+that both compute the same agent-flow id. The connector-code proofs need the .NET SDK (`dotnet`); the RAPP Store
+cases need a RAPP_Store checkout (`BFS_RAPP_STORE=~/src/RAPP_Store`); the code app tests need Playwright for Python
+with its Chromium, plus node and npm. Each group skips when its tools are missing.
 
 ## License
 

@@ -1,8 +1,9 @@
 # brainfreeze-studio in an Azure Function
 
 A person signs in with **their own account**, picks one of their Copilot Studio environments, and deploys a
-brainstem egg into it. The Function has no service account, and holds a user's sign-in only while their deploy
-runs. Every change lands with the signed-in user's rights.
+brainstem egg into it, or a RAPP Store rapplication (its agent plus its UI as a Power Apps code app). The Function
+has no service account, and holds a user's sign-in only while their deploy runs. Every change lands with the
+signed-in user's rights.
 
 ```
 browser page ──device-code sign-in (the user)──▶ Entra ID ──▶ delegated token + refresh token (kept in the page)
@@ -22,8 +23,11 @@ browser page ──device-code sign-in (the user)──▶ Entra ID ──▶ de
 
 - A Copilot Studio maker role in the target environment. The Environment Maker security role works.
 - The connections the agent's tools use, in that environment. A Dataverse connection covers the memory tools.
-  The deploy binds to one of the user's existing connections and says which one is missing. Creating a connection
-  needs the user's consent in Power Apps; no API can create one for them.
+  The deploy binds to one of the user's existing connections and says which one is missing. It makes a connection
+  itself only when no key or consent page is involved: for a connector that runs its own code, and for SharePoint
+  when the job has the user's API Hub token (see Set up).
+- For a rapplication's code app: code apps turned on in the environment, and the user's consent to PowerApps
+  Service's `User` permission for this app registration (users can give it themselves; the page asks).
 
 ## Set up
 
@@ -44,7 +48,14 @@ browser page ──device-code sign-in (the user)──▶ Entra ID ──▶ de
    - `BFS_ALLOW_TRANSLATIONS`: optional, and only with `BFS_ALLOWED_TENANTS`; see the note below.
 
 3. Publish: `./publish.sh <function app name> [path to copilot-harness-sdk]`. This bundles brainfreeze_studio, the
-   SDK's `tutorial/` assets and `azure-functions`, then runs `func azure functionapp publish`.
+   SDK's `tutorial/` assets, the code app host (built with npm, which needs Node 18+) and `azure-functions`, then
+   runs `func azure functionapp publish`.
+
+Publishing a rapplication's code app uses PowerApps Service's delegated `User` permission, asked for at sign-in
+(`POST /api/signin {purpose: "powerapps"}`), so it needn't be in the registration. Optional: for jobs to make a
+user's SharePoint connection when they have none (agents that read files), add a delegated permission to Azure
+API Hub (`https://apihub.azure.com`) to the registration. Without it, a job uses a SharePoint connection the user
+already has. This path hasn't been run with a person's sign-in yet.
 
 Open `https://<app>.azurewebsites.net/api/page`, sign in, pick an environment and an egg, and deploy.
 
@@ -73,7 +84,8 @@ resource, so the refresh token gets a token for whichever one is picked.
 | `GET /api/environments` | `Authorization: Bearer <discovery token>` → the environments the user belongs to: `{name, url, kind, region, id}`. |
 | `POST /api/signin/environment` | `{environment, refreshToken}` → the user's token for that environment (and a new refresh token), `canMakeAgents` and what's `missing`. Nothing is stored. |
 | `POST /api/deploy` | `Authorization: Bearer <user token>`, `{environment, name, egg (base64) \| eggUrl, schemaName?, hnApiName?, translations?}` → the deploy summary, the maker URL and the log. |
-| `POST /api/jobs` | The same body, plus `translationsZip`, `workspaceZip` and `refreshToken` → `202 {job}`. A background deploy of any size. |
+| `POST /api/jobs` | The same body, plus `translationsZip`, `workspaceZip` and `refreshToken` → `202 {job}`. A background deploy of any size. Or `{environment, rapplication: "@publisher/id", refreshToken, powerAppsToken?, filesSite?, filesFolder?, schemaName?, publisherPrefix?, store?}`: a RAPP Store rapplication. |
+| `GET /api/rapplications` | The RAPP Store catalog: the rapplications a job can deploy (cached for ten minutes). |
 | `GET /api/jobs/{job}` | `Authorization: Bearer <user token>` → the job's state (`queued`, `running`, `deploying`, `succeeded`, `failed`), its log and its result. Only the user who queued the job can read it. |
 
 Every route that does work first has Dataverse check the caller's token (`WhoAmI` in the target environment), so
@@ -100,6 +112,24 @@ The page always uses jobs.
 
 Storage is reached over its REST API with the managed identity's token, so `jobs.py`, like the rest of the app,
 needs nothing beyond the standard library and `azure-functions`.
+
+## Rapplications (an agent with its UI)
+
+A rapplication job prepares everything first (`brainfreeze_studio.rapplication.prepare`): the rapplication egg,
+the agent's workspace, Power Apps copies of the flows its UI calls, a chat flow when the UI talks to the agent
+itself, and the code app. Then it deploys the agent and those flows, and publishes the code app with the user's own
+Power Apps token, which it gets with their refresh token.
+
+- **No consent yet:** the agent and its flows deploy, and the job's result says the app is waiting. After the
+  sign-in that asks for the permission, running the job again publishes it.
+- **Agents that read files**, when their connector-code port is among the job's translations, read them from
+  SharePoint: `filesSite` and `filesFolder` set where (default: the environment's RAPP Files Site, else the
+  tenant's root site, and `/Shared Documents`).
+- **Translations** follow the same rule as eggs: they run the rapplication's code, so they need
+  `BFS_ALLOW_TRANSLATIONS`.
+
+On 25 Sep 2026 a job deployed BookFactory this way in 54 seconds (agent, flows and a published code app), and the
+app ran in the Power Apps player.
 
 ## Notes
 
