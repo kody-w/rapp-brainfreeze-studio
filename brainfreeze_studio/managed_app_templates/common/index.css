@@ -1,0 +1,6 @@
+:root { color-scheme: dark; --bg: #1e1e1e; --panel: #262626; --panel-2: #2d2d2d; --line: #3a3a3a; --text: #f3f3f3;
+  --muted: #a3a3a3; --accent: #4f9cf9; --accent-bg: #1f2f43; --good: #6ccf8e; --bad: #ff8a80; }
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { margin: 0; min-height: 100%; }
+body { background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+button, input, textarea { font: inherit; color: inherit; }

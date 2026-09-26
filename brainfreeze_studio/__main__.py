@@ -1,6 +1,7 @@
 """python3 -m brainfreeze_studio build <egg> --name "..." --publisher-prefix rapp [--sdk-dir ...] [--out build/]
 python3 -m brainfreeze_studio rapplication @kody-w/agent_team --out out/ [--environment https://<org>.crm.dynamics.com/ --deploy]
-python3 -m brainfreeze_studio codeapp-host"""
+python3 -m brainfreeze_studio codeapp-host
+python3 -m brainfreeze_studio managed-app spec.json --out out/ [--deploy --sdk-dir ../copilot-harness-sdk --tenant <id>]"""
 import argparse
 import json
 import os
@@ -67,7 +68,27 @@ def main(argv=None):
     pr.add_argument("--basic", help="the BasicAgent it runs beside (default: this package's, as rapplication builds use)")
     ch = sub.add_parser("codeapp-host", help="build the code app host once (needs node and npm)")
     ch.add_argument("--build-dir", help="default: ~/.cache/brainfreeze-studio/codeapp-host-build")
+    ma = sub.add_parser("managed-app", help="a managed app (Microsoft Copilot Managed Runtime) from a spec, of kind "
+                        "sharepoint-media, people-directory, calendar-dashboard, sharepoint-list or task-tracker")
+    ma.add_argument("spec", help="the spec JSON file: {kind, name, title?, ...the kind's settings} (README: Managed "
+                    "apps)")
+    ma.add_argument("--out", default="out", help="the project goes to <out>/managed-app (default: out)")
+    ma.add_argument("--deploy", action="store_true", help="register, bind, build, push and deploy it as the user "
+                    "signed in to the ms CLI (ms auth login); needs --sdk-dir and --tenant")
+    ma.add_argument("--no-deploy", action="store_true", help="with --deploy: stop after the local build and commit")
+    ma.add_argument("--sdk-dir", help="a copilot-harness-sdk checkout (its scripts/managed-apps.mjs)")
+    ma.add_argument("--tenant", help="the Entra tenant id of the account that owns the app (for the git push)")
+    ma.add_argument("--login-hint", help="that account's user name, to pick it at sign-in")
+    ma.add_argument("--environment-id", help="the Power Platform environment; omit to let the CLI choose")
+    ma.add_argument("--git-cache", help="an MSAL cache file for the git push (later pushes are silent)")
+    ma.add_argument("--create-table", action="store_true", help="task-tracker: create its Dataverse table and "
+                    "columns where missing (a schema change; uses az for the token)")
+    ma.add_argument("--dataverse-url", help="task-tracker: the environment URL for --create-table, if the spec has "
+                    "no dataverseUrl")
+    ma.add_argument("--json", action="store_true", help="print the result as JSON")
     a = p.parse_args(argv)
+    if a.cmd == "managed-app":
+        return _managed_app(a)
     if a.cmd == "codeapp-host":
         from .codeapp import build_host
         try:
@@ -178,6 +199,49 @@ def _record_proof(a):
         target = cc.proof_record_file(spec)
     target.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
     print(f"{spec['agent']}: {report['passed']}/{report['cases']} proven; recorded in {target}")
+    return 0
+
+
+def _managed_app(a):
+    from . import managed_app as ma
+    try:
+        spec = json.loads(open(a.spec, encoding="utf-8").read())
+        made = ma.scaffold(spec, a.out)
+    except (OSError, ValueError, ma.ManagedAppError) as e:
+        print(f"brainfreeze-studio: {e}", file=sys.stderr)
+        return 1
+    result = {"dir": str(made["dir"]), "report": made["report"]}
+    if a.deploy:
+        if not a.sdk_dir or not a.tenant:
+            print("brainfreeze-studio: --deploy needs --sdk-dir <copilot-harness-sdk> and --tenant <tenant id>",
+                  file=sys.stderr)
+            return 1
+        try:
+            result["deployed"] = ma.lifecycle(made["dir"], display_name=made["spec"]["name"], sdk_dir=a.sdk_dir,
+                                              tenant_id=a.tenant, environment_id=a.environment_id,
+                                              login_hint=a.login_hint, deploy=not a.no_deploy,
+                                              git_cache=a.git_cache, create_table=a.create_table,
+                                              dataverse_url=a.dataverse_url,
+                                              log=(lambda m: None) if a.json else print)
+        except ma.ManagedAppError as e:
+            print(f"brainfreeze-studio: {e}", file=sys.stderr)
+            return 1
+    if a.json:
+        print(json.dumps(result, indent=2))
+        return 0
+    r = made["report"]
+    print(f"managed app:  {r['app']}  ({made['dir']})")
+    print(f"{r['kind']}:{' ' * max(1, 13 - len(r['kind']))}{r['summary']}")
+    for d in r["dataSources"]:
+        table = f" {d['table']}" if d.get("table") else ""
+        print(f"connector:    {d['connector']} ({d['as']}{table}): {', '.join(d['allowedActions'])}")
+    if result.get("deployed"):
+        dep = result["deployed"]
+        print(f"app id:       {dep.get('appId')}")
+        if dep.get("playUrl"):
+            print(f"play:         {dep['playUrl']}  (commit {str(dep.get('commit'))[:7]})")
+    else:
+        print("next:         --deploy --sdk-dir ../copilot-harness-sdk --tenant <tenant id>   (or: cd there; ms app init; …)")
     return 0
 
 
