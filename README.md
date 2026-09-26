@@ -1,5 +1,9 @@
 # brainfreeze-studio
 
+<!-- rapp1:network-header:start -->
+[![RAPP/1](https://kody-w.github.io/rapp-hive-public/portfolio/badges/rapp-brainfreeze-studio.svg)](https://github.com/kody-w/rapp-hive-public/blob/main/portfolio/repos/rapp-brainfreeze-studio.md) · **New to RAPP?** [Start here: get your Brainstem →](https://github.com/kody-w/rapp-installer#start-here)
+<!-- rapp1:network-header:end -->
+
 Turn a frozen RAPP brainstem into a Copilot Studio agent, and a RAPP Store rapplication (an agent with its UI) into a
 Copilot Studio agent plus a Power Apps code app.
 
