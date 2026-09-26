@@ -1,9 +1,9 @@
 # Mapping: RAPP brainstems, agent.py and rapplications → Copilot Studio and Power Platform
 
 This is the parity scorecard for turning a frozen brainstem (a rapp/1 organism egg) into a Copilot Studio
-agent through [copilot-harness-sdk](https://github.com/kody-w/copilot-harness-sdk), and a rapplication (an agent
-with its UI) into a Copilot Studio agent plus a Power Apps code app. Every row says where a RAPP concept lands,
-and how far that is proven.
+agent through [copilot-harness-sdk](https://github.com/kody-w/copilot-harness-sdk), a rapplication (an agent
+with its UI) into a Copilot Studio agent plus a Power Apps code app, and a spec into a managed app (Microsoft's
+Copilot Managed Runtime). Every row says where a RAPP concept lands, and how far that is proven.
 
 | Status | Meaning |
 |---|---|
@@ -18,7 +18,10 @@ Evidence sources: [SDK capability ledger](https://github.com/kody-w/copilot-harn
 Preview (24 Sep 2026). For the rapplication and connector-code rows: live runs in a dev environment with code apps
 turned on (25 Sep 2026), `tests/test_rapplication.py`, `tests/test_codeapp*.py` and `tests/test_connector_code.py`,
 plus Microsoft Learn's Power Apps code apps and custom connector code documentation and the Power Apps CLI's
-publish code (`@microsoft/power-apps-cli` 1.0.2), as read on 25 Sep 2026.
+publish code (`@microsoft/power-apps-cli` 1.0.2), as read on 25 Sep 2026. For the managed-app rows: live deploys and
+App Player checks in the same environment (26 Sep 2026), `tests/test_managed_app.py`, copilot-harness-sdk's
+`test/managed-apps.test.js`, and the microsoft-managed-apps plugin as vendored in the SDK (`microsoft/managed-apps`
+at `90a8d55`), driven through `@microsoft/managed-apps-cli` 0.25.1.
 
 ## Score
 
@@ -28,7 +31,8 @@ publish code (`@microsoft/power-apps-cli` 1.0.2), as read on 25 Sep 2026.
 | agent.py (13 rows) | 9 | 2 | 2 |
 | Frozen-brainstem extras (7 rows) | 5 | 0 | 2 |
 | Rapplications (7 rows) | 7 | 0 | 0 |
-| **Total (43 rows)** | **31** | **6** | **6** |
+| Managed apps (9 rows) | 7 | 0 | 2 |
+| **Total (52 rows)** | **38** | **6** | **8** |
 
 **How agents keep working inside Copilot Studio:** an agent.py doesn't run in Studio, but its logic can be
 **translated** into Power Platform parts, the way the proven HackerNews and memory agents were: a custom
@@ -108,6 +112,28 @@ the rapp-god forum and JSON Doctor.
 | 6 | The agent flows the UI calls | A copy of each proven flow for Power Apps: the same actions, with the Power Apps trigger (`PowerAppV2`) and response (`PowerApp`) | **proven** / **built** | Only the trigger and response change, so the copy keeps the proven flow's parity: live, the Invoice Router's copy returned the Python's exact outputs in the player. Connector-code flows copy the same way, with their Dataverse and SharePoint reads; headless, the JSON Doctor app runs its copy's own expressions and the real compiled C# and shows the Python's answers. |
 | 7 | Serving the UI to people | Publishing the code app without the CLI, as the signed-in user | **proven** / **built** | The Power Apps resource provider (`api.powerapps.com`) does it with a token for `https://service.powerapps.com/`, a permission users can consent to themselves: `generateResourceStorage` for the user, upload to the returned blob, create (`2017-06-01`), update under a lease, `publish`. The Power Platform API route the CLI uses needs permissions a plain sign-in lacks. Live on 25 Sep 2026: apps created, updated and published from a laptop and from the Azure Function (BookFactory, a background job, in 54 seconds; JSON Doctor with its connector code, in 148 seconds). Apps land in the environment's default solution. |
 
+## Managed apps (Copilot Managed Runtime)
+
+A managed app runs in Microsoft's App Player and reaches data only through Power Platform connectors, with typed
+services the `ms` CLI (`@microsoft/managed-apps-cli`) generates. `python3 -m brainfreeze_studio managed-app <spec>
+[--deploy]` writes one of five kinds from a spec, the connector decision guide's common app patterns, one per
+connector skill. With `--deploy` it runs the plugin skills' lifecycle, using copilot-harness-sdk for the push and the
+shared-connection policy. Live in a dev environment on 26 Sep 2026: all five deployed hands-free and checked in the
+App Player (4 to 9 checks each, against Graph, the connector's own responses, a direct read of the list, or
+Dataverse).
+
+| # | Managed apps | Copilot Studio / Power Platform | Status | Notes |
+|---|---|---|---|---|
+| 1 | An app from a spec: `sharepoint-media`, `people-directory`, `calendar-dashboard`, `sharepoint-list`, `task-tracker` | A managed app in Microsoft's template shape (`templates/vite8`: React, Vite, the managed-apps Vite plugin), versions pinned | **proven** / **built** | Offline and deterministic; the screens are templates that are valid TypeScript as they stand, the spec's values go to `src/config.ts` as data (`tests/test_managed_app.py`). Their date and column logic is tested under Node in three time zones (`tests/test_managed_app_templates.py`). All five ran live on 26 Sep 2026. |
+| 2 | Its data | `ms app add data-source`, the way the add-sharepoint, add-office365-users, add-office365 and add-dataverse skills bind: the signed-in user's single sign-on connections, as actions or tables | **proven** | SharePoint actions and a SharePoint list table, Office 365 Users, Office 365 Outlook, a Dataverse table. `--connector dataverse` is ambiguous in `ms` 0.25.1; `commondataserviceforapps` binds. The probes saw every read and write go through the connector (`/apim/<connector>/…`). |
+| 3 | The code's calls into generated services | `src/bound.ts`, the only file that names generated code, rewritten from `generated/services` (each service's `dataSourceName`) after binding; the build type-checks against the real generated code | **proven** / **built** | Service names depend on the list or table (a list's service is named after it; a Dataverse table's is its entity set's, a default export). The compile gate was mutation-tested: a wrong export style, argument type, method name or config field fails the build. |
+| 4 | Least privilege on a shared connection | `allowedActions`, from the app's own calls, on the reference that holds each data source: action ids checked against the connector's `Allow` actions, or a table's verbs (`get`, `post`, `patch`, `delete`) on exactly that table; non-shared references get none, as the rule says; `check` mirrors the CLI's validation before deploy | **built** | The build refuses a template that calls anything it doesn't declare. The live apps used single sign-on connections, which aren't shared, so no policy was needed or written there. The shared path is unit-tested in both repos, and the whole lifecycle runs in tests against stand-ins for `ms`, node and npm (with real git). |
+| 5 | Files, videos and photos | Connector bytes shown as `data:` URLs, because the deployed player's content security policy (`media-src 'self' data:`) blocks `blob:` URLs | **proven** | A 17.7 MB film from SharePoint plays at 1920×1080 from a `data:` URL. Photos follow the add-office365-users skill (metadata first, then bytes); that tenant's users have no photos, so a photo's bytes weren't seen live. |
+| 6 | State an app keeps | A Dataverse table, made where missing the way the add-dataverse skill does: the CDS Default Publisher's prefix, the skill's column shapes, existing tables and columns left alone | **proven** / **built** | Live: a task added with a due date, completed and deleted in the app, read back from Dataverse at each step, with all four verbs through the connector. The table was created live with the same requests; the studio's `--create-table` ran live on the existing table and changed nothing. |
+| 7 | Build, push and deploy as the signed-in user | `ms app init --repo native`; a push to the app's platform repository with an Entra token (the client and scope the CLI gives Git Credential Manager), rebased onto the platform's first commit; `ms app deploy`; a redeploy updates the same app | **proven** | The platform builds the app from the pushed commit (the CLI asks for a build of that commit, then deploys it); the local build is a check before the push. A `--repo none` app can't deploy unless the environment allows external artifacts (`AllowExternalArtifactDeployment`). `ms app init` requires Git Credential Manager as the credential helper. After a redeploy, a player with the app cached runs the old build first and offers "New version available"; each page carries its build id (`<meta name="brainfreeze-build">`), and the live checks require the id they built. |
+| 8 | A rapplication's UI as a managed app | Not mapped: a managed app can't reach the rapplication's agent or its flows there | **gap** | In that tenant, the flows connector (`shared_logicflows`) is blocked for managed apps. The Copilot Studio connector offers only `ExecuteCopilot` and `ExecuteCopilotAsyncV2`, and plain Execute refuses GitHub Copilot harness agents. It would take the agentic-runtime action in the connector, or flows allowed for managed apps; until then rapplications stay code apps. |
+| 9 | Managed apps through the Azure Function (the hosted service) | Not built: the lifecycle needs node, git and the `ms` CLI, which the Function doesn't have | **gap** | Reading the `ms` CLI 0.25.1's code: none of it needs node on the server. Registering and binding are REST calls, the typed services are generated locally from connector metadata, and a native app is built on the platform from the pushed commit (`…/build`, then `…/deploy`). So a Python Function could register, write the project (this tool already writes it offline), push it and deploy it. What isn't known: whether the Function's own sign-in can get the user's delegated tokens for those APIs (the CLI uses Microsoft's own client, and service principals are refused), and whether the git endpoint takes a token from another client (it takes the CLI's client's token, as `Basic OAUTH_USER:<token>`, live). |
+
 ## What would move the score
 
 In order of how much parity each one buys:
@@ -119,3 +145,7 @@ In order of how much parity each one buys:
 4. **Connectors that need an API key** (agent.py row 9).
 5. **Generating connector-code ports** from the agent's source, instead of writing them by hand (agent.py rows 5,
    11 and 12 are proven per agent: Thoughtbox, the rapp-god forum, JSON Doctor).
+6. **A rapplication's UI as a managed app** (managed apps row 8): the Copilot Studio connector's agentic-runtime
+   action for managed apps, or flows allowed for them.
+7. **Managed apps through the Azure Function** (managed apps row 9): the user's delegated tokens for the managed
+   apps APIs from the Function's own sign-in, then the same register, push and deploy calls from Python.

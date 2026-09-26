@@ -5,7 +5,8 @@
 <!-- rapp1:network-header:end -->
 
 Turn a frozen RAPP brainstem into a Copilot Studio agent, and a RAPP Store rapplication (an agent with its UI) into a
-Copilot Studio agent plus a Power Apps code app.
+Copilot Studio agent plus a Power Apps code app. It also writes and deploys **managed apps** (Microsoft's Copilot
+Managed Runtime) from a small spec.
 
 [brainfreeze](https://github.com/kody-w/rapp-brainfreeze) freezes a brainstem into a rapp/1 organism egg: its soul,
 agents and memory, plus a session egg for the conversation. brainfreeze-studio turns that egg into a **GitHub
@@ -180,6 +181,58 @@ Azure Function as a background job; Thoughtbox, the rapp-god forum and JSON Doct
 code. Headless, `tests/test_codeapp_browser.py` plays packaged apps in a stand-in player under the same policy,
 and the JSON Doctor app runs its flow's own expressions and the real compiled C# against the Python.
 
+## Managed apps (Copilot Managed Runtime)
+
+```bash
+npm install -g @microsoft/managed-apps-cli && ms auth login     # Microsoft's CLI; the account that will own the app
+python3 -m brainfreeze_studio managed-app people.json --out out/ --deploy --sdk-dir ../copilot-harness-sdk \
+    --tenant <tenant id> --environment-id <environment id>        # omit --deploy to only write the project
+```
+
+A managed app runs in Microsoft's App Player and reaches data only through Power Platform connectors, with typed
+services the `ms` CLI generates. `managed-app` writes the project from a spec, offline and deterministic, in the
+shape of Microsoft's template (`microsoft/managed-apps` `templates/vite8`). With `--deploy` it runs what the
+[microsoft-managed-apps plugin](https://github.com/microsoft/managed-apps/tree/main/plugins/microsoft-managed-apps/skills)
+skills do: `ms app init` with a platform repository, `ms app add data-source` for each connector, the build, a push
+and `ms app deploy`. copilot-harness-sdk does the parts the skills leave to a person: the push (an Entra token,
+no Git Credential Manager prompt) and the shared-connection policy. The skills are vendored there unchanged.
+
+| Kind | The app | Connector (skill) | What it may call |
+|---|---|---|---|
+| `sharepoint-media` | Plays the videos, images or audio in a SharePoint folder: `{site, folder, media?, maxBytes?}` | SharePoint actions (add-sharepoint) | `GetFolderMetadataByPath`, `ListFolder`, `GetFileContentByPath` |
+| `people-directory` | You, your manager and direct reports, a directory search, profile photos: `{searchTop?}` | Office 365 Users (add-office365-users) | `MyProfile_V2`, `Manager_V2`, `DirectReports_V2`, `SearchUserV2`, `UserPhotoMetadata`, `UserPhoto_V2` |
+| `calendar-dashboard` | The coming days of your calendar, by day (all-day and overnight events on every day they cover), with totals: `{days?, calendar?}` | Office 365 Outlook (add-office365) | `CalendarGetTables`, `GetEventsCalendarViewV2` |
+| `sharepoint-list` | A SharePoint list as a searchable table, read-only: `{site, list, columns?, groupBy?, top?}` (`columns` may name any column, `Modified` or `ID` included) | SharePoint list table (add-sharepoint) | `get` |
+| `task-tracker` | Tasks in a Dataverse table: add (with a due date), complete, delete: `{table, entitySet?, tableLabel?, dataverseUrl?}` | Dataverse table (add-dataverse) | `get`, `post`, `patch`, `delete` |
+
+Every spec also takes `name` (the app's name in the environment), and optionally `title` and `description`.
+`report.json` lists what the app calls on each connector; the build refuses a template that calls anything else, and
+a shared connection gets exactly that list as its `allowedActions`, on the reference that holds the data source. `src/bound.ts` is the only file that names
+generated code: once the CLI has bound the connectors, it is rewritten from `generated/services`, so the app uses
+whatever the CLI generated, and the type check fails if the signatures don't fit. Files, videos and photos are
+shown as `data:` URLs, because the deployed player's content security policy blocks `blob:` URLs. Each app marks
+its state on its status line (`data-state`: loading, ready, empty, error), and its controls carry `data-testid`s,
+so a test or an agent can drive it without reading pixels. Only the latest request's answer is shown: a slow earlier
+one can't overwrite it, and the task tracker takes no writes until its first read is in. The page carries the build's
+id (`<meta name="brainfreeze-build">`, also in `report.json`), so a check can confirm the player runs the build it
+just made and not one it cached. For a `task-tracker`, `--create-table` (with az) makes
+the table and its four columns where they are missing, the way the add-dataverse skill does.
+
+Live in a dev environment (26 Sep 2026), all five were deployed by `managed-app --deploy` and checked in the App
+Player against the source of truth: a 17.7 MB film from SharePoint plays at 1920×1080; the directory shows the
+signed-in user and matches Microsoft Graph; the calendar shows exactly what the connector returned for seeded
+events (today and the next 14 days, including an all-day one); the list shows every item a direct read of it
+returns; a task added with a due date, completed and deleted is read back from Dataverse at each step.
+
+What didn't work there, and why: a `--repo none` app can't be deployed unless the environment allows external
+artifacts (`AllowExternalArtifactDeployment`); `ms app init` requires Git Credential Manager as the repository's
+credential helper; `--connector dataverse` is ambiguous in `ms` 0.25.1 (`commondataserviceforapps` works); right
+after a redeploy, a player that has the app cached first runs the old build and offers "New version available".
+A rapplication's UI can't become a managed app in that tenant, which is why rapplications stay code apps: the
+flows connector is blocked for managed apps, and the Copilot Studio connector has no action that reaches
+GitHub Copilot harness agents. Managed apps don't go through the Azure Function yet: this runs where node, git and
+the `ms` CLI are (MAPPING, managed apps row 9, has what the hosted path takes).
+
 ## Deploy as the person signed in
 
 `brainfreeze_studio.deploy` puts a built workspace into Copilot Studio with nothing but a Dataverse token. That
@@ -213,11 +266,11 @@ user's own Power Apps token.
 
 ## How close is it?
 
-[MAPPING.md](MAPPING.md) maps every brainstem, agent.py and rapplication concept to its Copilot Studio and Power
-Platform counterpart, with a status and evidence per row. Today: **31 of 43** proven or built, 6 approximated,
-6 gaps. The translated InvoiceRouter flow has run live in Copilot Studio with its proven outputs, including the
-half-cent midpoint, and so have the materialized AIBAST flows, the connector-code ports (state, network, files)
-and the rapplications' code apps.
+[MAPPING.md](MAPPING.md) maps every brainstem, agent.py, rapplication and managed-app concept to its Copilot Studio
+and Power Platform counterpart, with a status and evidence per row. Today: **38 of 52** proven or built,
+6 approximated, 8 gaps. The translated InvoiceRouter flow has run live in Copilot Studio with its proven outputs,
+including the half-cent midpoint, and so have the materialized AIBAST flows, the connector-code ports (state,
+network, files), the rapplications' code apps and the five managed apps.
 Next: the side-by-side parity report (the same prompts to the brainstem and the Studio agent), parent + child
 agents, memory seeding, and connectors that need an API key.
 
@@ -232,7 +285,11 @@ HARNESS_SDK_DIR=../copilot-harness-sdk GRAIL_AGENTS_DIR=~/.brainstem/src/rapp_br
 The parity test runs the SDK's own `scanWorkspace` and `expectedComponents` on a built workspace, and checks
 that both compute the same agent-flow id. The connector-code proofs need the .NET SDK (`dotnet`); the RAPP Store
 cases need a RAPP_Store checkout (`BFS_RAPP_STORE=~/src/RAPP_Store`); the code app tests need Playwright for Python
-with its Chromium, plus node and npm. Each group skips when its tools are missing.
+with its Chromium, plus node and npm. Each group skips when its tools are missing. `MANAGED_APP_BUILD=1` compiles
+every managed-app kind against a real registered app (`MANAGED_APP_FIXTURE`: its `generated/`, `ms.config.json` and
+`node_modules`) with specs that match what it bound (`MANAGED_APP_FIXTURE_SPECS`: `{kind: spec}`); once it is set,
+a missing fixture fails instead of skipping. The templates' date and column logic also run under Node (22.6 or later,
+which runs TypeScript directly) in three time zones: `tests/test_managed_app_templates.py`.
 
 ## License
 
