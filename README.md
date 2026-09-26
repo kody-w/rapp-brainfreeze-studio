@@ -96,6 +96,23 @@ The AIBAST Copilot applied this to the 72 published agents of the AIBAST agents 
 including hand-translated operations and dates from the flow's clock, returned the real Python's output byte
 for byte. The workshop engine, which keeps state and runs `pac`, stays a reasoning-only skill.
 
+**Materialized over pinned data, for agents that read a dataset.** An agent that loads files by path (a site's
+weekly exports, a configuration file) is a function of its arguments and that data, so the data can be pinned:
+`materialize(agent, basic, data={"SITE_DIR": folder}, values={"project_id": [...]}, env={...})` records the folder's
+SHA-256 in the spec, runs the agent on a private copy (anything it writes lands there), and every later proof
+refuses different data; `values` names the ids that live in the data rather than the code, so each one is tried.
+The flow then serves that dataset as it was, which fits a scheduled scan: new data means materializing again. A
+proof can be recorded where the data is (`python3 -m brainfreeze_studio record-proof <spec> <agent.py>`), pinned to
+the exact agent, BasicAgent and spec, and a build that can't run it, such as the Azure Function service, lays the
+flow on that record without the data and without running any agent code. A nine-agent procurement MVP over a
+synthetic SharePoint export (1,530 files) went through this path: seven agents materialized (350/350 cases), two
+left as skills (one's project-by-item table is too big for a flow; one prints wall-clock timings). The Azure
+Function then built and deployed it from the egg and the recorded proofs in 133 seconds, identical to a local
+build flow for flow and component for component. Live in a dev environment's Copilot Studio, a nine-prompt
+walkthrough answered with every tool output equal to the Python. Finding: the harness orchestrator read an
+optional scope's bare value list as a list to call the tool with one by one, summing a partial total; materialized
+tool descriptions now carry each input's own words.
+
 **Connector code, for logic too heavy for flow expressions.** A port of the agent's logic to C#
 (`translations/<agent>.csx`, with a spec whose `"mode"` is `"connector-code"`) runs as a custom connector's code,
 built on `PyCompat` (Python's JSON, float formatting, rounding, string and error semantics, linked into every

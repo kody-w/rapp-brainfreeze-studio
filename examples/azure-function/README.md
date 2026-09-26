@@ -130,6 +130,12 @@ Power Apps token, which it gets with their refresh token.
   a connector-code port is laid on the proof recorded for its exact bytes (`<port>.proof.json`), which runs
   nothing. The job asks for the user's Power Apps token when the agent runs connector code, which needs a
   connection.
+- **Materialized over pinned data:** an egg job whose translations were materialized over a dataset the service
+  doesn't hold is laid on the proofs recorded with them (`<spec>.proof.json` in `translationsZip`), pinned to the
+  exact agent, BasicAgent, spec and dataset digest; the job neither needs the data nor runs agent code. On 25 Sep
+  2026 a job built and deployed a nine-agent procurement MVP this way in 133 seconds (seven proven flows, two
+  skills), identical to the local build, and its Copilot Studio agent answered a nine-prompt walkthrough with every
+  tool output equal to the Python.
 
 On 25 Sep 2026 a job deployed BookFactory this way in 54 seconds (agent, flows and a published code app), and the
 app ran in the Power Apps player. Another job deployed JSON Doctor in 148 seconds, with its connector code on the
