@@ -1,5 +1,5 @@
 {
-  "schema": "brainfreeze-studio-setup/1",
+  "schema": "brainfreeze-studio-setup/2",
   "product": "brainfreeze studio",
   "site": "https://kody-w.github.io/rapp-brainfreeze-studio/",
   "repository": "https://github.com/kody-w/rapp-brainfreeze-studio",
@@ -7,69 +7,86 @@
   "claude_code": "https://kody-w.github.io/rapp-brainfreeze-studio/CLAUDE.md",
   "llms": "https://kody-w.github.io/rapp-brainfreeze-studio/llms.txt",
   "golden_path": "github-copilot",
-  "compatibility": [
-    "claude-code",
-    "any AI agent that can run commands"
-  ],
+  "compatibility": ["claude-code", "any AI agent that can run commands"],
   "requirements": {
     "python": ">=3.9",
     "git": "any",
     "azure_cli": "for the person's own sign-in (az login)",
-    "node_and_npm": "only for a Power Apps code app"
+    "node_and_npm": "only for a RAPP Store app's Power Apps code app (leave out --no-app)"
   },
   "work_folder": "~/brainfreeze-work",
   "setup": [
-    "git clone https://github.com/kody-w/rapp-brainfreeze-studio.git",
-    "python3 -m venv .venv"
+    "mkdir -p ~/brainfreeze-work && cd ~/brainfreeze-work",
+    "git clone https://github.com/kody-w/rapp-brainfreeze-studio.git"
   ],
-  "runner": {
-    "bfs": "../.venv/bin/python -m brainfreeze_studio",
-    "bfs_windows": "..\\.venv\\Scripts\\python.exe -m brainfreeze_studio",
-    "cwd": "~/brainfreeze-work/rapp-brainfreeze-studio"
+  "update": "git -C rapp-brainfreeze-studio pull --ff-only",
+  "cwd": "~/brainfreeze-work/rapp-brainfreeze-studio",
+  "run": "python3 -m brainfreeze_studio",
+  "windows": {
+    "python3": "py -3",
+    "../.venv/bin/python": "..\\.venv\\Scripts\\python.exe",
+    "~/": "$HOME\\",
+    "work_folder": "New-Item -ItemType Directory -Force \"$HOME\\brainfreeze-work\"; Set-Location \"$HOME\\brainfreeze-work\"",
+    "store_ids": "quote them: '@rapp/markdown_medic'"
   },
   "sign_in": {
     "person_runs": "az login --allow-no-subscriptions",
     "other_tenant": "add --tenant <their tenant domain>",
     "separate_profile": "AZURE_CONFIG_DIR=~/.azure-brainfreeze",
-    "list_environments": "bfs environments"
+    "list_environments": "python3 -m brainfreeze_studio environments",
+    "prefer": "a Developer or Sandbox environment; Production only when the person confirms"
   },
   "sources": {
     "brainstem": {
       "tools": [
-        "../.venv/bin/python -m pip install git+https://github.com/kody-w/rapp-brainfreeze.git",
+        "python3 -m venv ../.venv",
+        "../.venv/bin/python -m pip install \"git+https://github.com/kody-w/rapp-brainfreeze.git\"",
         "git -C .. clone https://github.com/kody-w/copilot-harness-sdk.git"
       ],
       "freeze": "../.venv/bin/python -m brainfreeze egg ~/.brainstem/src/rapp_brainstem --owner <github-login> --slug <short-name> --no-memory --out ../eggs",
-      "build": "bfs build ../eggs/<github-login>--<short-name>.egg --name \"<Agent name>\" --publisher-prefix rapp --sdk-dir ../copilot-harness-sdk --translations translations/ --environment <environment> --out ../build/<short-name>",
-      "deploy": "bfs deploy ../build/<short-name>/workspace --environment <environment> --draft"
+      "build": "python3 -m brainfreeze_studio build ../eggs/<github-login>--<short-name>.egg --name \"<Agent name>\" --publisher-prefix rapp --sdk-dir ../copilot-harness-sdk --translations translations/ --environment <environment> --out ../build/<short-name>",
+      "plan": "python3 -m brainfreeze_studio deploy ../build/<short-name>/workspace --environment <environment> --draft --plan",
+      "deploy": "python3 -m brainfreeze_studio deploy ../build/<short-name>/workspace --environment <environment> --draft"
     },
     "rapp_store_app": {
       "catalog": "https://kody-w.github.io/RAPP_Store/",
-      "build": "bfs rapplication <@publisher/id> --translations translations/ --out ../build/<id>",
-      "deploy": "bfs rapplication <@publisher/id> --translations translations/ --out ../build/<id> --environment <environment> --deploy --draft --no-app"
+      "index": "https://raw.githubusercontent.com/kody-w/RAPP_Store/main/index.json",
+      "id": "<publisher>/<id> from the index, for example @rapp/markdown_medic",
+      "build": "python3 -m brainfreeze_studio rapplication <@publisher/id> --translations translations/ --no-app --out ../build/<id>",
+      "plan": "python3 -m brainfreeze_studio rapplication <@publisher/id> --translations translations/ --no-app --out ../build/<id> --environment <environment> --deploy --draft --plan",
+      "deploy": "python3 -m brainfreeze_studio rapplication <@publisher/id> --translations translations/ --no-app --out ../build/<id> --environment <environment> --deploy --draft"
     },
     "sample": {
-      "build": "bfs rapplication examples/rapplications/invoice_router --translations translations/ --out ../build/invoice-router",
-      "deploy": "bfs rapplication examples/rapplications/invoice_router --translations translations/ --out ../build/invoice-router --environment <environment> --deploy --draft --no-app",
+      "build": "python3 -m brainfreeze_studio rapplication examples/rapplications/invoice_router --translations translations/ --no-app --out ../build/invoice-router",
+      "plan": "python3 -m brainfreeze_studio rapplication examples/rapplications/invoice_router --translations translations/ --no-app --out ../build/invoice-router --environment <environment> --deploy --draft --plan",
+      "deploy": "python3 -m brainfreeze_studio rapplication examples/rapplications/invoice_router --translations translations/ --no-app --out ../build/invoice-router --environment <environment> --deploy --draft",
       "parity": "parity:       InvoiceRouter 72/72 PROVEN",
       "question": "Route an invoice from Fabrikam for $18,750.",
       "check": "expand the agent's Route an invoice step: its Output is exactly the answer below",
       "answer": "Fabrikam $18,750.00: queue APPROVAL, needs AP manager sign-off (limit $10,000)."
     }
   },
+  "open_link": {
+    "macos": "open \"<link>\"",
+    "windows": "start \"\" \"<link>\"",
+    "windows_powershell": "Start-Process \"<link>\"",
+    "linux": "xdg-open \"<link>\""
+  },
   "verify": [
-    "the build's parity lines: each translated agent matches its Python on every test case, or is refused",
+    "the build's parity lines: each translated agent matches its Python on every test case, or is refused and stays a skill",
+    "the plan (--plan): what the deploy would create, update or remove, read without changing anything",
     "the deploy's read-back: every component is on the live record, and it is the harness agent that was built",
     "a real reply in Copilot Studio's test chat, opened from the deploy's maker: link"
   ],
   "consent": {
     "before_install": "say what you will set up and where, and wait for yes",
-    "before_deploy": "say what you will create in which environment, and wait for yes",
+    "before_deploy": "run the deploy with --plan, show what it would create, update or remove, and wait for yes",
     "publish": "only when the person asks: the same deploy without --draft"
   },
   "never": [
     "publish without the person asking",
     "deploy to an environment the person did not pick",
+    "update or remove an agent the person didn't make with brainfreeze studio: choose a new --name",
     "use a service account, a client secret or an app-only token",
     "delete agents, flows, connections or data, or change environment settings",
     "print, paste or save a token"

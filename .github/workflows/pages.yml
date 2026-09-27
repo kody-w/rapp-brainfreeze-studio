@@ -29,7 +29,8 @@ jobs:
           python-version: "3.12"
       - name: Check the site against the command line
         run: |
-          python -m pip install --quiet "git+https://github.com/kody-w/rapp-brainfreeze.git"
+          python -m pip install --quiet "git+https://github.com/kody-w/rapp-brainfreeze.git" playwright
+          python -m playwright install --with-deps chromium
           python -m unittest tests/test_onboarding_site.py -v
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
