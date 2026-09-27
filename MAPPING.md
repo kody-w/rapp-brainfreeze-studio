@@ -41,6 +41,10 @@ it reads, custom connector code (C#) for logic too heavy for flow expressions, a
 translation is **proven** against the agent's real Python before it's deployed, and a failed proof is refused. An
 outside MCP host is only the fallback, for agents bound to the machine they run on (agent.py row 7).
 
+The SDK profiles require the reviewed grail source digests (CRLF normalized to LF), not just matching names.
+The pinned files match the grail `49db80c8` Invoice Desk snapshot reviewed on 24 Sep 2026; a match reports its
+digest and says it was not re-proven against that file. Different code with a familiar name falls back with a reason.
+
 ## Brainstem runtime
 
 | # | Brainstem | Copilot Studio harness | Status | Notes |
@@ -59,14 +63,14 @@ outside MCP host is only the fallback, for agents bound to the machine they run 
 | 12 | Settings in `.env` (read by agents, `requires_env`) | Environment variables, read by the translated flow | **built** | A translated agent's setting becomes a flow parameter bound to an environment variable (for example `rapp_InvoiceApprovalLimit`), and the parity proof covers several values. `provenance.json` lists the variables to create with the SDK's `upsertEnvironmentVariable`. Live (24 Sep 2026), the flow ran with the default limit; a changed value hasn't been tested live. Deploys now create these variables themselves; on 25 Sep 2026 the RAPP Files Site and Folder variables a deploy created were what the JSON Doctor flow's SharePoint reads used (the flow's parameter defaults carry the same values, so a run doesn't tell the two apart). |
 | 13 | Voice mode (`\|\|\|VOICE\|\|\|` split) | — | **gap** | No harness equivalent is mapped. Teams and M365 channels handle speech themselves. |
 | 14 | Channels: the web UI, any `/chat` client | Teams and Microsoft 365 Copilot (`setChannels` + publish) | **proven** | Declared and published. The portal builds the Teams app package on first publish. |
-| 15 | Health and introspection (`/health`) | `assertHarnessAgent` + `listComponents` readback | **proven** | The SDK reads back template, instructions, published state and every component. |
+| 15 | Health and introspection (`/health`) | `assertHarnessAgent` + `listComponents` readback | **proven** | The SDK reads back template, instructions, published state and every component. brainfreeze-studio compares component content and descriptions, exact flow links, parsed flow definitions and activation, connection bindings and environment-variable presence before publishing. |
 | 16 | Runs anywhere Python runs; the user owns their instance | A tenant-owned agent in a Power Platform environment | **gap** | This is the tier change itself, not a bug. Needs pac + Entra + an environment. |
 
 ## agent.py
 
 | # | agent.py | Copilot Studio harness | Status | Notes |
 |---|---|---|---|---|
-| 1 | Contract: `metadata` `name` / `description` / `parameters` | Skill frontmatter and input contract; tool descriptions | **built** | Read statically (the egg's code never runs during a build): `test_contract_is_read_without_running_egg_code`. |
+| 1 | Contract: `metadata` `name` / `description` / `parameters` | Skill frontmatter and input contract; tool descriptions | **built** | Contract read statically (`test_contract_is_read_without_running_egg_code`). With translations, proofs run the agent's Python in a separate process with a clean, allow-listed environment and temporary home/working folders (file proofs use temporary fixture folders); recorded proofs run no code. This is not a sandbox: the code can still read any file this user can read by absolute path, and use the network. Build only eggs you trust. |
 | 2 | HackerNews agent (`perform` calls the HN API) | Custom connector + agent flow (`WorkflowTool`) + fetch-hacker-news skill | **proven** / **built** | The tutorial proved live stories through the flow. Needs `--hn-api-name` (the environment's connector). Flow ids match the SDK's (`test_the_sdk_reads_the_workspace_and_agrees_on_flow_ids`). This tool's own build fetched live stories through the flow on 24 Sep 2026. Parity note: the SDK's output contract prints the summary's closing sentence ("When presenting these to the user, render the titles as clickable markdown links exactly as written above."), which a brainstem's model follows instead of printing. |
 | 3 | ManageMemory / ContextMemory agents | Dataverse Add row / List rows `ConnectorTool`s + manage-memory / recall-memory skills | **proven** / **built** | Needs `--environment` (the org URL). Without it the agent falls back to reasoning-only, and the build says so. This tool's own build wrote a memory as a Dataverse `annotations` row and recalled it in a fresh conversation on 24 Sep 2026. |
 | 4 | **Rules or math in `perform()`** (for example InvoiceRouter) | An **agent flow** translated from a spec (`translations/*.json`), laid as a `WorkflowTool` | **proven** / **built** | Translate-then-prove: the compiled flow's own expressions are evaluated and compared with the real Python on every test vector and setting value. InvoiceRouter: **56/56**. A wrong rule, or plain `formatNumber` (.NET rounds midpoints away from zero, Python to even), fails the gate (`tests/test_translate.py`). The SDK reads the flow tool (`test_the_sdk_reads_the_flow_tool`). Live on 24 Sep 2026, the Studio agent called the flow and got the proven outputs byte-for-byte, including the exact midpoint (`0.125` → `$0.12`, Python's rounding), so the offline evaluator's prediction held live. |

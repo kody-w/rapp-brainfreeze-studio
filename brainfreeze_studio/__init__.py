@@ -36,9 +36,13 @@ __version__ = "0.2.0"
 __all__ = ["build", "read_contract", "workflow_id_for", "StudioBuildError"]
 
 PROFILES = {
-    "hackernews": {"match": re.compile(r"^hackernews$", re.I), "needs": "hn_api_name"},
-    "memory-write": {"match": re.compile(r"^managememory$", re.I), "needs": "environment"},
-    "memory-recall": {"match": re.compile(r"^contextmemory$", re.I), "needs": "environment"},
+    # Grail 49db80c8, frozen for the Invoice Desk review on 2026-09-24.
+    "hackernews": {"match": re.compile(r"^hackernews$", re.I), "needs": "hn_api_name",
+                   "sha256": {"314cb08b0dc1167e3fc6799160fd178c54dfb0edc13d83c656b07b56a56620e9"}},
+    "memory-write": {"match": re.compile(r"^managememory$", re.I), "needs": "environment",
+                      "sha256": {"fe30c952f1ddd0507d05f7a84bc0406c2b5d5c82da5ad28f5380b050acb23f4f"}},
+    "memory-recall": {"match": re.compile(r"^contextmemory$", re.I), "needs": "environment",
+                       "sha256": {"83563b7836cd6c79c78eb70369ccbf0ad7eba02d6adc562b1e9dc41a77617769"}},
 }
 MAX_DISPLAY_NAME = 42          # longer names never finish provisioning (copilot-harness-sdk)
 
@@ -438,12 +442,19 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
             continue
         profile = next((k for k, p in PROFILES.items() if p["match"].match(contract["name"] or "")), None)
         note = None
-        if profile and sdk_dir is None:
+        digest = hashlib.sha256(files[path].replace(b"\r\n", b"\n")).hexdigest()
+        if profile and digest not in PROFILES[profile]["sha256"]:
+            profile, note = None, (f"named {contract['name']} but its code isn't the reviewed grail agent "
+                                   f"(sha256 {digest[:12]}); reasoning-only")
+        elif profile and sdk_dir is None:
             profile, note = None, "no --sdk-dir: proven profiles unavailable, deployed as a reasoning-only skill"
         elif profile == "hackernews" and not hn_api_name:
             profile, note = None, "needs --hn-api-name (the environment's RAPP Hacker News connector); reasoning-only for now"
         elif profile in ("memory-write", "memory-recall") and not environment:
             profile, note = None, "needs --environment (the Dataverse org URL); reasoning-only for now"
+        elif profile:
+            note = (f"SDK profile for the grail's {contract['name']}, sha256 {digest[:12]}; "
+                    "not re-proven against this file")
         agents.append({"file": path, "source": source, "contract": contract, "profile": profile, "note": note})
 
     out = Path(out_dir).expanduser()
@@ -604,6 +615,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
     for a in agents:
         if a["profile"]:
             continue
+        a["note"] = a["note"] or "no proven profile or translation spec for it"
         skill, yaml = _reasoning_skill(a["contract"], a["source"])
         (ws / "behaviors" / f"{publisher_prefix}_{skill}.mcs.yml").write_text(yaml)
         generic.append(skill)

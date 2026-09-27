@@ -1,5 +1,6 @@
 # Publishes site/ (the onboarding page, its setup skill and contract) to GitHub Pages,
-# after checking that every command it gives still parses and every link resolves.
+# after checking that every command it gives still parses, the page works in a real browser (a missing
+# browser fails the check), and every link resolves, external ones fetched live.
 name: Pages
 
 on:
@@ -27,10 +28,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Check the site against the command line
+      - name: Check the site against the command line, in a browser, and its links live
+        env:
+          BFS_REQUIRE_BROWSER: "1"
+          BFS_CHECK_LINKS: "1"
         run: |
-          python -m pip install --quiet "git+https://github.com/kody-w/rapp-brainfreeze.git"
-          python -m unittest tests/test_onboarding_site.py -v
+          python -m pip install --quiet "git+https://github.com/kody-w/rapp-brainfreeze.git" playwright
+          python -m playwright install --with-deps chromium
+          python -m unittest tests/test_onboarding_site.py tests/test_onboarding_page.py tests/test_cli.py -v
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -463,13 +463,14 @@ class FlowTests(unittest.TestCase):
 @unittest.skipUnless(HAVE_DOTNET and HAVE_THOUGHTBOX, "needs dotnet and a RAPP_Store checkout (BFS_RAPP_STORE)")
 class BuildAndDeployTests(unittest.TestCase):
     def test_build_lays_the_connector_and_deploy_creates_it_connects_it_and_fills_the_flows(self):
-        from test_codeapp import ENV_ID, TOKEN, FakePowerApps
-        from test_deploy import ENV, FakeDataverse
+        from test_codeapp import ENV_ID, OID, TOKEN, FakePowerApps
+        from test_deploy import DATAVERSE_TOKEN, ENV, FakeDataverse
 
         class Dataverse(FakeDataverse):
             def __init__(self):
                 super().__init__()
                 self.t["connectors"] = {}
+                self.t["connectionreferences"].clear()
 
             def __call__(self, method, path, body=None, prefer=None, headers=None, ok404=False):
                 if path.startswith("RetrieveCurrentOrganization"):
@@ -490,7 +491,9 @@ class BuildAndDeployTests(unittest.TestCase):
                 if "/connections" in path and path.startswith("apis/"):
                     self.log.append((req.get_method(), url.netloc, url.path, {}))
                     if req.get_method() == "GET":
-                        conns = [{"name": n, "properties": {"statuses": [{"status": "Connected"}]}} for n in self.conns]
+                        names = ["conn-1"] if path.startswith("apis/shared_commondataserviceforapps/") else self.conns
+                        conns = [{"name": n, "properties": {"createdBy": {"id": OID},
+                                                          "statuses": [{"status": "Connected"}]}} for n in names]
                         return _R(200, json.dumps({"value": conns}).encode())
                     self.conns.append(path.rsplit("/", 1)[-1])
                     return _R(201, json.dumps({"name": self.conns[-1]}).encode())
@@ -509,7 +512,8 @@ class BuildAndDeployTests(unittest.TestCase):
         self.assertIn("public static class PyJson", (conn_dir / "script.csx").read_text())      # linked in
         dv, rp = Dataverse(), PowerApps()
         rp.conns = []
-        r = rapplication.deploy(out, ENV, lambda: "dv", lambda: TOKEN, log=lambda *a: None, dataverse=dv, opener=rp)
+        r = rapplication.deploy(out, ENV, lambda: DATAVERSE_TOKEN, lambda: TOKEN, log=lambda *a: None,
+                                dataverse=dv, opener=rp)
         self.assertEqual([c["operation"] for c in r["agent"]["connectors"]], ["created"])
         self.assertEqual(r["agent"]["connectors"][0]["connectionOperation"], "created")
         flow = dv.t["workflows"][bs.workflow_id_for("rapp_Thoughtbox", "ThoughtboxFlow")]
@@ -521,7 +525,8 @@ class BuildAndDeployTests(unittest.TestCase):
         refs = {x["connectionreferencelogicalname"]: x for x in dv.t["connectionreferences"].values()}
         self.assertEqual(refs["rapp_Thoughtbox.shared_rapp_code_thoughtboxflow"]["connectionid"], rp.conns[0])
         self.assertEqual(refs["rapp_Thoughtbox.shared_commondataserviceforapps"]["connectionid"], "conn-1")   # the user's own
-        again = rapplication.deploy(out, ENV, lambda: "dv", lambda: TOKEN, log=lambda *a: None, dataverse=dv, opener=rp)
+        again = rapplication.deploy(out, ENV, lambda: DATAVERSE_TOKEN, lambda: TOKEN, log=lambda *a: None,
+                                    dataverse=dv, opener=rp)
         self.assertEqual([(c["operation"], c["connectionOperation"]) for c in again["agent"]["connectors"]],
                          [("unchanged", "existing")])
         self.assertEqual(len(rp.conns), 1)
