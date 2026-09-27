@@ -46,8 +46,11 @@ write. The default removes components absent from the workspace; `--keep-extra` 
 the plan. The plan also names each connection reference's source; an unrelated environment connection is used
 only with `--use-shared-connection`, and is reported as `shared connection (not yours)`.
 
-The build is offline and deterministic: the same egg always gives the same workspace. The egg is verified
-first, and its agents' contracts are read statically, so no code from the egg runs during a build.
+The build verifies the egg first and reads its agents' contracts statically. With `--translations`, proofs run
+the agent's Python on this computer in a separate process with a clean, allow-listed environment and a temporary
+home and working folder (file proofs use temporary fixture folders). Recorded proofs run no code.
+This is not a sandbox: the code can still read any file this user can read by absolute path, and use the network.
+Build only eggs you trust.
 
 | Output | What it is |
 |---|---|

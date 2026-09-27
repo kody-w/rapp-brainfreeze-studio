@@ -26,12 +26,19 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from contextlib import ExitStack
 from pathlib import Path
+
+from .materialize import (PROOF_BOOTSTRAP, ProofProtocolError, ProofResults, _unique_fields, complete_proof,
+                          proof_environment, proof_lines, proof_process, proof_python, proof_results)
 
 HARNESS_ROOT = Path("~/.cache/brainfreeze-studio/connector-harness").expanduser()
 NEWTONSOFT = "13.0.3"
@@ -82,8 +89,8 @@ public abstract class ScriptBase
 """
 
 PROGRAM = USINGS + r"""
-// One case per stdin line: {"operationId", "body": <request JSON>, "responses": {"GET <url>": {"status", "body"}}}.
-// Writes {"status", "body"} per case. SendAsync answers only from the recorded responses: a proof has no network.
+// One case per stdin line: {"case_id", "operationId", "body", "responses"}.
+// Writes {"case_id", "status", "body"} per case. SendAsync replays recorded responses, not the network.
 class ProofContext : IScriptContext
 {
     public string CorrelationId { get; set; } = "proof";
@@ -110,6 +117,8 @@ public static class Program
     public static async Task Main()
     {
         Console.OutputEncoding = new UTF8Encoding(false);
+        var protocol = new System.IO.StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+        Console.SetOut(Console.Error);
         var stdin = new System.IO.StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
         string line;
         while ((line = await stdin.ReadLineAsync()) != null)
@@ -135,7 +144,8 @@ public static class Program
             {
                 result = new JObject { ["status"] = -1, ["body"] = e.GetType().Name + ": " + e.Message };
             }
-            Console.WriteLine(result.ToString(Newtonsoft.Json.Formatting.None));
+            result["case_id"] = c["case_id"];
+            protocol.WriteLine(result.ToString(Newtonsoft.Json.Formatting.None));
         }
     }
 }
@@ -219,16 +229,26 @@ def compile_script(script):
 
 def run_script(dll, cases):
     """Run cases [{"operationId", "body", "responses"?}] through the compiled code; returns [{"status", "body"}]."""
-    stdin = "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases)
-    p = subprocess.run(["dotnet", str(dll)], input=stdin, capture_output=True, text=True, encoding="utf-8")
-    if p.returncode != 0:
-        raise ConnectorCodeError(f"the connector code runner failed: {p.stderr.strip()[-600:]}")
-    return [json.loads(line) for line in p.stdout.splitlines() if line.strip()]
+    stdin = "".join(json.dumps(dict(c, case_id=i), ensure_ascii=False) + "\n" for i, c in enumerate(cases))
+    try:
+        with tempfile.TemporaryDirectory(prefix="bfs-code-proof-") as work:
+            p = subprocess.run(["dotnet", str(Path(dll).resolve())], input=stdin.encode("utf-8"), capture_output=True,
+                               timeout=120, env=proof_environment(work), cwd=work)
+        out = proof_results(p.stdout, len(cases), "connector-code", "C# runner")
+        if p.returncode != 0:
+            raise ProofProtocolError("C# runner", f"runner exited with status {p.returncode}", len(cases), len(out))
+    except ProofProtocolError as e:
+        raise ConnectorCodeError(str(e)) from None
+    except (subprocess.TimeoutExpired, OSError) as e:
+        observed = len(proof_lines(e.stdout)) if isinstance(e, subprocess.TimeoutExpired) else 0
+        why = "runner timed out" if isinstance(e, subprocess.TimeoutExpired) else "runner could not start"
+        raise ConnectorCodeError(str(ProofProtocolError("C# runner", why, len(cases), observed))) from None
+    return out
 
 
 # ── the Python side: the real agent, with its workspace, clock and ids fixed per call ───────────────────────────
 
-PY_RUNNER = r'''
+PY_RUNNER = PROOF_BOOTSTRAP + r'''
 import datetime as _dt, importlib.abc, importlib.util, io, json, sys, types, urllib.error, urllib.request, uuid
 
 agent_file, basic_file = sys.argv[1:3]
@@ -336,7 +356,7 @@ for line in sys.stdin:
     finally:
         _os.chdir(_home)
         _shutil.rmtree(_library, ignore_errors=True)
-    print(json.dumps({"output": out, "state": written}), flush=True)
+    _proof_send({"case_id": case["case_id"], "output": out, "state": written})
 '''
 
 
@@ -385,29 +405,107 @@ def named_files(spec, args):
 
 
 class _Session:
-    """A long-running process that answers one JSON line with one JSON line."""
+    """A correlated, timeout-bounded stream, including EOF: trailing output is never discarded."""
 
-    def __init__(self, cmd, **kw):
-        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  text=True, encoding="utf-8", bufsize=1, **kw)
+    def __init__(self, cmd, scheduled, kind, label, timeout=120, **kw):
+        self.results = ProofResults(scheduled, kind, label)
+        self.sent, self.timeout, self.lines, self.writes = 0, timeout, queue.Queue(), queue.Queue()
+        try:
+            self.p = proof_process(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+        except OSError:
+            self.results.fail("runner could not start")
+        self.readers = [threading.Thread(target=self._read_stdout, daemon=True),
+                        threading.Thread(target=self._drain_stderr, daemon=True),
+                        threading.Thread(target=self._write_stdin, daemon=True)]
+        for reader in self.readers:
+            reader.start()
+
+    def _read_stdout(self):
+        try:
+            for line in self.p.stdout:
+                self.lines.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self.lines.put(None)
+
+    def _drain_stderr(self):
+        # Agent print()/native stdout is redirected here. Drain continuously so large logs cannot block a proof.
+        try:
+            while self.p.stderr.read(4096):
+                pass
+        except (OSError, ValueError):
+            pass
+
+    def _write_stdin(self):
+        while True:
+            item = self.writes.get()
+            if item is None:
+                return
+            data, done, errors = item
+            try:
+                self.p.stdin.write(data)
+                self.p.stdin.flush()
+            except (OSError, ValueError):
+                errors.append(True)
+            finally:
+                done.set()
+
+    def _line(self, timeout):
+        try:
+            return self.lines.get(timeout=max(0, timeout))
+        except queue.Empty:
+            self.results.fail("runner timed out")
 
     def ask(self, obj):
-        self.p.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        self.p.stdin.flush()
-        line = self.p.stdout.readline()
-        if not line:
-            raise ConnectorCodeError(f"{self.p.args[0]} stopped: {self.p.stderr.read()[-600:]}")
-        return json.loads(line)
+        ident = self.sent
+        self.sent += 1
+        deadline = time.monotonic() + self.timeout
+        done, errors = threading.Event(), []
+        self.writes.put(((json.dumps(dict(obj, case_id=ident), ensure_ascii=False) + "\n").encode("utf-8"), done, errors))
+        if not done.wait(self.timeout):
+            self.results.fail("runner timed out sending case")
+        if errors:
+            self.results.fail(f"missing result for case_id {ident}: runner stopped")
+        line = self._line(deadline - time.monotonic())
+        if line is None:
+            self.results.fail(f"missing result for case_id {ident}: runner stopped")
+        result = self.results.add(line)
+        if result["case_id"] != ident:
+            self.results.fail(f"out-of-order result: expected case_id {ident}")
+        return result
 
-    def close(self):
+    def finish(self):
         try:
             self.p.stdin.close()
-            self.p.wait(timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError:
+            pass
+        deadline = time.monotonic() + 30
+        while True:
+            line = self._line(deadline - time.monotonic())
+            if line is None:
+                break
+            self.results.add(line)         # an extra, duplicate or noisy line at shutdown also refuses the proof
+        try:
+            self.p.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            self.results.fail("runner timed out at shutdown")
+        if self.p.returncode != 0:
+            self.results.fail(f"runner exited with status {self.p.returncode}")
+        self.results.finish()
+
+    def close(self):
+        if self.p.poll() is None:
             self.p.kill()
-            self.p.wait()
-        for pipe in (self.p.stdout, self.p.stderr):
-            pipe.close()
+        self.p.wait()
+        self.writes.put(None)
+        for reader in self.readers:
+            reader.join(timeout=5)
+        for pipe in (self.p.stdin, self.p.stdout, self.p.stderr):
+            try:
+                pipe.close()
+            except OSError:
+                pass
 
 
 LIBRARY = Path(__file__).with_name("connector_lib") / "PyCompat.cs"
@@ -423,49 +521,61 @@ def linked(script_text):
 def prove(spec, agent_file, basic_file, script_file, python=None, records=False):
     """Run every sequence of the spec through the real Python and the compiled C#; each carries its own state from
     call to call. Parity means every output and every file written is identical. records=True keeps every call's
-    pair of outputs in the result (evidence)."""
+    pair of outputs in the result (evidence). `cases`/`scheduled` count calls in the spec; `observed` counts compared
+    pairs, and `observed_python`/`observed_code` count each stream's records, including any refused extra record."""
     script = linked(Path(script_file).read_text(encoding="utf-8"))
     dll = compile_script(script)
     workspace = bool((spec.get("state") or {}).get("files"))
-    tmp = tempfile.mkdtemp(prefix="bfs-connector-proof-")
-    runner = Path(tmp) / "runner.py"
-    runner.write_text(PY_RUNNER)
-    py = _Session([python or sys.executable, str(runner), str(agent_file), str(basic_file),
-                   json.dumps(spec.get("hide_modules") or [])], env={**os.environ, "PYTHONHASHSEED": "0"})
-    cs = _Session(["dotnet", str(dll)])
-    results = []
+    scheduled = sum(len(sequence) for sequence in spec["sequences"])
+    results, reason, py, cs = [], None, None, None
     try:
-        for n, sequence in enumerate(spec["sequences"]):
-            initial = ((spec.get("initial_states") or [])[n:n + 1] or [None])[0] or spec.get("initial_state") or {}
-            py_state, cs_state = dict(initial), dict(initial)
-            for k, call in enumerate(sequence):
-                now = call.get("now") or spec.get("now") or "2026-09-25T10:00:00Z"
-                ident = call.get("id") or f"00000000-0000-4000-8000-{n:04x}{k:08x}"
-                responses = {**(spec.get("responses") or {}), **(call.get("responses") or {})}
-                library = named_files(spec, call["args"])
-                out_py = py.ask({"args": call["args"], "state": py_state, "now": now, "ids": derived_ids(ident, 64),
-                                 "workspace": workspace, "responses": responses, "library": library})
-                body = {"args": call["args"], "state": cs_state, "now": now, "id": ident}
-                if spec.get("file_inputs"):
-                    body["files"] = files_body(spec, call["args"])
-                raw = cs.ask({"operationId": spec.get("operation", "Run"), "responses": responses, "body": body})
-                try:
-                    out_cs = json.loads(raw["body"]) if raw["status"] == 200 else {
-                        "output": f"HTTP {raw['status']}: {raw['body']}", "state": {}}
-                except ValueError:
-                    out_cs = {"output": f"not JSON: {raw['body'][:300]}", "state": {}}
-                match = out_py["output"] == out_cs.get("output") and out_py["state"] == (out_cs.get("state") or {})
-                results.append({"sequence": n, "call": k, "args": call["args"], "python": out_py, "code": out_cs,
-                                "match": match})
-                py_state.update(out_py["state"])
-                cs_state.update(out_cs.get("state") or {})
-    finally:
-        py.close()
-        cs.close()
-        shutil.rmtree(tmp, ignore_errors=True)
+        with ExitStack() as stack:
+            py_work = stack.enter_context(tempfile.TemporaryDirectory(prefix="bfs-connector-python-"))
+            cs_work = stack.enter_context(tempfile.TemporaryDirectory(prefix="bfs-connector-code-"))
+            py = _Session([proof_python(python), "-B", "-c", PY_RUNNER, str(Path(agent_file).resolve()),
+                           str(Path(basic_file).resolve()), json.dumps(spec.get("hide_modules") or [])],
+                          scheduled, "connector-python", "Python runner", env=proof_environment(py_work), cwd=py_work)
+            stack.callback(py.close)
+            cs = _Session(["dotnet", str(Path(dll).resolve())], scheduled, "connector-code", "C# runner",
+                          env=proof_environment(cs_work), cwd=cs_work)
+            stack.callback(cs.close)
+            for n, sequence in enumerate(spec["sequences"]):
+                initial = ((spec.get("initial_states") or [])[n:n + 1] or [None])[0] or spec.get("initial_state") or {}
+                py_state, cs_state = dict(initial), dict(initial)
+                for k, call in enumerate(sequence):
+                    now = call.get("now") or spec.get("now") or "2026-09-25T10:00:00Z"
+                    ident = call.get("id") or f"00000000-0000-4000-8000-{n:04x}{k:08x}"
+                    responses = {**(spec.get("responses") or {}), **(call.get("responses") or {})}
+                    library = named_files(spec, call["args"])
+                    out_py = py.ask({"args": call["args"], "state": py_state, "now": now, "ids": derived_ids(ident, 64),
+                                     "workspace": workspace, "responses": responses, "library": library})
+                    body = {"args": call["args"], "state": cs_state, "now": now, "id": ident}
+                    if spec.get("file_inputs"):
+                        body["files"] = files_body(spec, call["args"])
+                    raw = cs.ask({"operationId": spec.get("operation", "Run"), "responses": responses, "body": body})
+                    try:
+                        out_cs = json.loads(raw["body"]) if raw["status"] == 200 else {
+                            "output": f"HTTP {raw['status']}: {raw['body']}", "state": {}}
+                    except ValueError:
+                        raise ConnectorCodeError("C# runner: malformed response body (not JSON)") from None
+                    if not (isinstance(out_cs, dict) and isinstance(out_cs.get("output"), str)
+                            and isinstance(out_cs.get("state") or {}, dict)):
+                        raise ConnectorCodeError("C# runner: malformed response body (invalid output/state)")
+                    match = out_py["output"] == out_cs["output"] and out_py["state"] == (out_cs.get("state") or {})
+                    results.append({"case_id": out_py["case_id"], "sequence": n, "call": k, "args": call["args"],
+                                    "python": out_py, "code": out_cs, "match": match})
+                    py_state.update(out_py["state"])
+                    cs_state.update(out_cs.get("state") or {})
+            py.finish()
+            cs.finish()
+    except (ProofProtocolError, ConnectorCodeError) as e:
+        reason = str(e)
     passed = sum(r["match"] for r in results)
-    proof = {"agent": spec["agent"], "mode": "connector-code", "cases": len(results), "passed": passed,
-             "parity": passed == len(results) and bool(results), "sequences": len(spec["sequences"]),
+    proof = {"agent": spec["agent"], "mode": "connector-code", "cases": scheduled, "passed": passed,
+             "scheduled": scheduled, "observed": len(results),
+             "observed_python": py.results.observed if py else 0, "observed_code": cs.results.observed if cs else 0,
+             "parity": reason is None and passed == scheduled and scheduled > 0, "sequences": len(spec["sequences"]),
+             **({"reason": reason} if reason else {}),
              "mismatches": [r for r in results if not r["match"]][:10],
              "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest()}
     if records:
@@ -488,11 +598,13 @@ def proof_record_file(spec):
 def record(spec, report, source_sha256, basic_sha256, when):
     """What a passing proof leaves behind: the exact bytes it held for (the agent's source, its BasicAgent, the
     linked script, the spec) and its count, so a build without the .NET SDK can lay the port without rerunning it."""
-    if not report["parity"]:
-        raise ConnectorCodeError(f"only a passing proof is recorded ({report['passed']}/{report['cases']})")
+    scheduled = sum(len(sequence) for sequence in spec["sequences"])
+    if not complete_proof(report, scheduled):
+        raise ConnectorCodeError(f"only a passing proof covering exactly {scheduled} scheduled cases is recorded")
     return {"agent": spec["agent"], "source_sha256": source_sha256, "basic_sha256": basic_sha256,
             "script_sha256": report["script_sha256"], "spec_sha256": spec_sha256(spec), "python": spec.get("python"),
-            "cases": report["cases"], "passed": report["passed"], "parity": True, "proven": when}
+            "cases": scheduled, "scheduled": scheduled, "observed": scheduled,
+            "passed": scheduled, "parity": True, "proven": when}
 
 
 def recorded_proof(spec, source_sha256, basic_sha256, script_text):
@@ -501,12 +613,18 @@ def recorded_proof(spec, source_sha256, basic_sha256, script_text):
     f = proof_record_file(spec)
     if not f.is_file():
         return None
-    rec = json.loads(f.read_text(encoding="utf-8"))
-    script_sha = hashlib.sha256(linked(script_text).encode("utf-8")).hexdigest()
-    if not (rec.get("parity") and rec.get("source_sha256") == source_sha256 and rec.get("basic_sha256") == basic_sha256
-            and rec.get("script_sha256") == script_sha and rec.get("spec_sha256") == spec_sha256(spec)):
+    try:
+        rec = json.loads(f.read_text(encoding="utf-8"), object_pairs_hook=_unique_fields)
+    except (ValueError, OSError):
         return None
-    return {"agent": spec["agent"], "mode": "connector-code", "cases": rec["cases"], "passed": rec["passed"],
+    script_sha = hashlib.sha256(linked(script_text).encode("utf-8")).hexdigest()
+    scheduled = sum(len(sequence) for sequence in spec["sequences"])
+    if not (isinstance(rec, dict) and complete_proof(rec, scheduled) and rec.get("source_sha256") == source_sha256
+            and rec.get("basic_sha256") == basic_sha256 and rec.get("script_sha256") == script_sha
+            and rec.get("spec_sha256") == spec_sha256(spec) and isinstance(rec.get("proven"), str)):
+        return None
+    return {"agent": spec["agent"], "mode": "connector-code", "cases": scheduled, "passed": scheduled,
+            "scheduled": scheduled, "observed": scheduled, "observed_python": scheduled, "observed_code": scheduled,
             "parity": True, "sequences": len(spec["sequences"]), "mismatches": [], "script_sha256": script_sha,
             "recorded": rec["proven"]}
 
