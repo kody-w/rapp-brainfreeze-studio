@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brainfreeze_studio import __main__ as cli  # noqa: E402
 from brainfreeze_studio import discovery  # noqa: E402
 from brainfreeze_studio.codeapp_publish import AUDIENCE  # noqa: E402
+from test_deploy import DATAVERSE_TOKEN  # noqa: E402
 
 
 class _Response(io.BytesIO):
@@ -173,6 +174,13 @@ class RapplicationDraft(unittest.TestCase):
         self.assertIs(seen["publish_agent"], True)
         self.assertNotIn("Draft", out)
 
+    def test_deploy_safety_flags_reach_the_rapplication_deployer(self):
+        code, _, seen = self.deploy("--expect", "123456abcdef", "--keep-extra", "--use-shared-connection")
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["expect"], "123456abcdef")
+        self.assertTrue(seen["keep_extra_components"])
+        self.assertTrue(seen["use_shared_connection"])
+
 
 class RapplicationNoApp(unittest.TestCase):
     def test_no_app_builds_without_a_host_and_says_why_it_is_absent(self):
@@ -196,7 +204,7 @@ class RapplicationNoApp(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         dv = FakeDataverse()
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.object(cli, "az_token", return_value="token"), \
+                mock.patch.object(cli, "az_token", return_value=DATAVERSE_TOKEN), \
                 mock.patch("brainfreeze_studio.deploy.Dataverse", return_value=dv), \
                 mock.patch("brainfreeze_studio.codeapp.host_bundle", side_effect=AssertionError("no Node")), \
                 mock.patch("brainfreeze_studio.codeapp_publish.publish", side_effect=AssertionError("no app")), \
@@ -217,7 +225,7 @@ class RapplicationNoApp(unittest.TestCase):
 
 def plan_command(argv, dv, powerapps=None):
     from copy import deepcopy
-    from test_codeapp import TOKEN
+    from test_codeapp import OID, TOKEN
     from test_deploy import ReadOnlyDataverse
 
     readonly, resources = ReadOnlyDataverse(dv), []
@@ -225,15 +233,18 @@ def plan_command(argv, dv, powerapps=None):
 
     def token(resource):
         resources.append(resource)
-        return TOKEN if resource == AUDIENCE else "dv-token"
+        return TOKEN if resource == AUDIENCE else DATAVERSE_TOKEN
 
     def connect(environment, get_token):
         assert environment == dv.environment
-        assert get_token() == "dv-token"
+        assert get_token() == DATAVERSE_TOKEN
         return readonly
 
     def opener(req, **kw):
         assert req.get_method() == "GET", f"a plan tried to {req.get_method()} {req.full_url}"
+        if "/apis/" in req.full_url and "/connections?" in req.full_url:
+            return _Response(json.dumps({"value": [{"name": "conn-1", "properties": {
+                "createdBy": {"id": OID}, "statuses": [{"status": "Connected"}]}}]}).encode())
         assert powerapps is not None, f"unexpected HTTP: {req.full_url}"
         return powerapps(req, **kw)
 
@@ -249,15 +260,24 @@ def plan_command(argv, dv, powerapps=None):
 
 
 class DeployPlan(unittest.TestCase):
-    CREATE = ('plan:        creates the agent "Test Desk" (rapp_TestDesk)\n'
+    CREATE = ('agent:       Test Desk  (rapp_TestDesk)\n'
+              'plan:        create: no agent with this schema name exists\n'
+              'status:      Draft: new agent, not published\n'
               'tools:       adds 3, updates 0, removes 0, keeps 0\n'
+              'remove:      none\n'
               'flows:       creates 1, updates 0\n'
               'settings:    creates 1 environment variables, 1 connection references\n'
+              'connection:  rapp_TestDesk.cr.shared_commondataserviceforapps: your connection\n'
               'plan only:   nothing was changed\n')
-    UPDATE = ('plan:        updates the agent "Test Desk" (rapp_TestDesk) in place\n'
-              'tools:       adds 0, updates 0, removes 1: rapp_TestDesk.skill.rapp_desk-help, keeps 2\n'
+    UPDATE = ('agent:       Test Desk  (rapp_TestDesk)\n'
+              'plan:        update: an agent with this schema name exists ("Test Desk"), components below change\n'
+              'status:      Draft: not published\n'
+              'tools:       adds 0, updates 0, removes 1, keeps 2\n'
+              'remove:      rapp_TestDesk.skill.rapp_desk-help\n'
+              'connection:  rapp_TestDesk.cr.shared_commondataserviceforapps: existing binding\n'
               'plan only:   nothing was changed\n')
-    REFUSE = ('plan:        refuses: rapp_TestDesk exists but is a classic agent (default-2.1.0); refusing to change it\n'
+    REFUSE = ('agent:       Test Desk  (rapp_TestDesk)\n'
+              'plan:        refuse: rapp_TestDesk exists but is a classic agent (default-2.1.0); refusing to change it\n'
               'plan only:   nothing was changed\n')
 
     def setUp(self):
@@ -270,37 +290,48 @@ class DeployPlan(unittest.TestCase):
     def command(self, *extra):
         code, out, err, resources = plan_command(["deploy", str(self.ws), "--environment", self.env.rstrip("/"),
                                                  "--plan", *extra], self.dv)
-        self.assertEqual(resources, [self.env.rstrip("/")])
+        self.assertEqual(resources[0], self.env.rstrip("/"))
+        self.assertTrue(set(resources) <= {self.env.rstrip("/"), AUDIENCE, cli.APIHUB})
         return code, out, err
 
+    def output(self, body):
+        return f"digest:      {self.dp.workspace_digest(self.ws)[:12]}\n" + body
+
     def seed(self):
-        return self.dp.deploy(self.ws, self.env, lambda: "token", dataverse=self.dv, do_publish=False, log=lambda *_: None)
+        return self.dp.deploy(self.ws, self.env, lambda: DATAVERSE_TOKEN, dataverse=self.dv, do_publish=False,
+                               connections={"rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"},
+                               log=lambda *_: None)
 
     def test_create_plan_has_the_fixed_labels_with_or_without_draft(self):
         for draft in ([], ["--draft"]):
             with self.subTest(draft=draft):
-                self.assertEqual(self.command(*draft), (0, self.CREATE, ""))
+                self.assertEqual(self.command(*draft), (0, self.output(self.CREATE), ""))
 
     def test_update_plan_names_every_removal(self):
         self.seed()
         (self.ws / "behaviors" / "rapp_desk-help.mcs.yml").unlink()
         settings = self.ws / "settings.mcs.yml"
         settings.write_text(settings.read_text().replace("Answer briefly.", "Answer carefully."))
-        self.assertEqual(self.command(), (0, self.UPDATE, ""))
+        self.assertEqual(self.command(), (0, self.output(self.UPDATE), ""))
 
     def test_unchanged_plan_omits_zero_flow_and_setting_counts(self):
         self.seed()
         code, out, err = self.command()
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(out, 'plan:        leaves the agent "Test Desk" (rapp_TestDesk) unchanged\n'
-                             'tools:       adds 0, updates 0, removes 0, keeps 3\n'
-                             'plan only:   nothing was changed\n')
+        self.assertEqual(out, self.output(
+            'agent:       Test Desk  (rapp_TestDesk)\n'
+            'plan:        unchanged: agent settings match ("Test Desk"); component and flow changes are listed below\n'
+            'status:      Draft: not published\n'
+            'tools:       adds 0, updates 0, removes 0, keeps 3\n'
+            'remove:      none\n'
+            'connection:  rapp_TestDesk.cr.shared_commondataserviceforapps: existing binding\n'
+            'plan only:   nothing was changed\n'))
 
     def test_refusal_is_read_only_and_exits_one_in_human_and_json_modes(self):
         self.dv.t["bots"]["old"] = {"botid": "old", "schemaname": "rapp_TestDesk", "template": "default-2.1.0"}
         for draft in ([], ["--draft"]):
             with self.subTest(draft=draft):
-                self.assertEqual(self.command(*draft), (1, self.REFUSE, ""))
+                self.assertEqual(self.command(*draft), (1, self.output(self.REFUSE), ""))
                 code, out, err = self.command("--json", *draft)
                 self.assertEqual((code, err), (1, ""))
                 self.assertEqual(json.loads(out)["agent"]["operation"], "refuse")
@@ -309,25 +340,65 @@ class DeployPlan(unittest.TestCase):
         code, out, err = self.command("--json")
         self.assertEqual((code, err), (0, ""))
         r = json.loads(out)
-        self.assertEqual(set(r), {"agent", "components", "flows", "environmentVariables", "connectionReferences"})
+        self.assertEqual(set(r), {"agent", "components", "flows", "environmentVariables", "connectionReferences",
+                                  "digest", "status", "keepExtraComponents", "keptExtraComponents"})
         self.assertEqual(r["agent"]["operation"], "create")
+
+    def test_keep_extra_names_the_components_that_will_be_kept(self):
+        self.seed()
+        (self.ws / "behaviors" / "rapp_desk-help.mcs.yml").unlink()
+        code, out, err = self.command("--keep-extra")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("remove:      none\n", out)
+        self.assertIn("keep:        rapp_TestDesk.skill.rapp_desk-help (--keep-extra)\n", out)
+
+    def test_plan_reveals_the_existing_display_name_for_a_schema_collision(self):
+        made = self.seed()
+        self.dv.t["bots"][made["botId"]]["name"] = "Test-Desk"
+        code, out, err = self.command()
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("agent:       Test Desk  (rapp_TestDesk)\n", out)
+        self.assertIn('plan:        update: an agent with this schema name exists ("Test-Desk"), components below change\n',
+                      out)
+
+    def test_expect_refuses_before_the_cli_requests_any_token(self):
+        digest = self.dp.workspace_digest(self.ws)[:12]
+        settings = self.ws / "settings.mcs.yml"
+        settings.write_text(settings.read_text() + "\nchanged\n")
+        now = self.dp.workspace_digest(self.ws)[:12]
+        with mock.patch.object(cli, "az_token", side_effect=AssertionError("no token")):
+            for flags in ([], ["--plan"]):
+                code, out, err = run(["deploy", str(self.ws), "--environment", self.env, "--expect", digest, *flags])
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(err, f"brainfreeze-studio: the build changed since the plan "
+                                     f"(digest {now}, planned {digest}); plan again\n")
+
+    def test_app_only_sign_in_is_refused_without_constructing_a_transport(self):
+        from test_deploy import jwt
+        with mock.patch.object(cli, "az_token", return_value=jwt({"idtyp": "app", "roles": ["Maker"]})), \
+                mock.patch.object(self.dp, "Dataverse", side_effect=AssertionError("no transport")):
+            for flags in ([], ["--plan"]):
+                code, out, err = run(["deploy", str(self.ws), "--environment", self.env, *flags])
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(err, "brainfreeze-studio: this is an app-only token; sign in as yourself (az login)\n")
 
     def test_files_overrides_are_previewed_before_deploy(self):
         from test_deploy import files_workspace
         self.ws, _ = files_workspace(self.ws.parent / "files")
-        self.dp.deploy(self.ws, self.env, lambda: "token", dataverse=self.dv, do_publish=False, log=lambda *_: None,
+        self.dp.deploy(self.ws, self.env, lambda: DATAVERSE_TOKEN, dataverse=self.dv, do_publish=False, log=lambda *_: None,
                         files_site="https://contoso.sharepoint.com",
-                        connections={"rapp_TestDesk.shared_sharepointonline": "sp-1"})
+                        connections={"rapp_TestDesk.shared_sharepointonline": "sp-1",
+                                     "rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"})
         site, folder = "https://contoso.sharepoint.com/sites/new", "/Other Documents"
         code, out, err = self.command("--json", "--files-site", site, "--files-folder", folder)
         self.assertEqual((code, err), (0, ""))
         changes = json.loads(out)["flows"]["update"]
         self.assertEqual(changes, ["Test Desk JsonDoctorFlow"])
-        deployed = self.dp.deploy(self.ws, self.env, lambda: "token", dataverse=self.dv, do_publish=False,
+        deployed = self.dp.deploy(self.ws, self.env, lambda: DATAVERSE_TOKEN, dataverse=self.dv, do_publish=False,
                                    log=lambda *_: None, files_site=site, files_folder=folder)
         self.assertEqual(changes, [f["name"] for f in deployed["flows"] if f["operation"] == "updated"])
 
-    def test_an_empty_workspace_prints_only_the_two_required_lines(self):
+    def test_an_empty_workspace_omits_zero_counts_but_keeps_the_safety_lines(self):
         for path in (self.ws / "capabilities").rglob("*.mcs.yml"):
             path.unlink()
         (self.ws / "behaviors" / "rapp_desk-help.mcs.yml").unlink()
@@ -335,8 +406,12 @@ class DeployPlan(unittest.TestCase):
             if path.is_file():
                 path.unlink()
         (self.ws.parent / "provenance.json").write_text("{}")
-        self.assertEqual(self.command(), (0, 'plan:        creates the agent "Test Desk" (rapp_TestDesk)\n'
-                                            'plan only:   nothing was changed\n', ""))
+        self.assertEqual(self.command(), (0, self.output(
+            'agent:       Test Desk  (rapp_TestDesk)\n'
+            'plan:        create: no agent with this schema name exists\n'
+            'status:      Draft: new agent, not published\n'
+            'remove:      none\n'
+            'plan only:   nothing was changed\n'), ""))
 
 
 class RapplicationPlan(unittest.TestCase):
@@ -363,25 +438,26 @@ class RapplicationPlan(unittest.TestCase):
             with self.subTest(draft=draft):
                 code, out, err, resources = self.command(*draft)
                 self.assertEqual((code, err), (0, ""))
-                self.assertIn('plan:        creates the agent "Invoice Router" (rapp_InvoiceRouter)\n', out)
+                self.assertIn('agent:       Invoice Router  (rapp_InvoiceRouter)\n', out)
+                self.assertIn('plan:        create: no agent with this schema name exists\n', out)
                 self.assertIn("flows:       creates 1, updates 0\n", out)
                 self.assertIn("code app:     not built (--no-app)\n", out)
                 self.assertTrue(out.endswith("plan only:   nothing was changed\n"))
-                self.assertEqual(resources, [self.env.rstrip("/")])
+                self.assertEqual(set(resources), {self.env.rstrip("/")})
                 self.assertNotIn("deployed", json.loads((self.out / "rapplication.json").read_text()))
 
     def test_update_plan_names_the_components_it_would_remove(self):
         from brainfreeze_studio import deploy as dp
         self.rp.prepare(self.ref, self.out, translations=str(self.root / "translations"), app=False)
-        made = dp.deploy(self.out / "workspace", self.env, lambda: "token", dataverse=self.dv, do_publish=False,
+        made = dp.deploy(self.out / "workspace", self.env, lambda: DATAVERSE_TOKEN, dataverse=self.dv, do_publish=False,
                           log=lambda *_: None)
         self.dv.t["bots"][made["botId"]]["name"] = "Old name"
         self.dv.t["botcomponents"]["legacy"] = {"botcomponentid": "legacy", "_parentbotid_value": made["botId"],
                                                "schemaname": "handmade.topic.Legacy", "name": "Legacy", "data": ""}
         code, out, err, _ = self.command()
         self.assertEqual((code, err), (0, ""))
-        self.assertIn('updates the agent "Invoice Router" (rapp_InvoiceRouter) in place', out)
-        self.assertIn("removes 1: handmade.topic.Legacy", out)
+        self.assertIn('update: an agent with this schema name exists ("Old name")', out)
+        self.assertIn("remove:      handmade.topic.Legacy", out)
 
     def test_a_classic_agent_refuses_in_human_and_json_modes(self):
         self.dv.t["bots"]["old"] = {"botid": "old", "schemaname": "rapp_InvoiceRouter", "template": "default-2.1.0"}
@@ -392,7 +468,7 @@ class RapplicationPlan(unittest.TestCase):
                 if "--json" in extra:
                     self.assertEqual(json.loads(out)["agent"]["operation"], "refuse")
                 else:
-                    self.assertIn("plan:        refuses: rapp_InvoiceRouter exists but is a classic agent", out)
+                    self.assertIn("plan:        refuse: rapp_InvoiceRouter exists but is a classic agent", out)
 
     def test_app_plan_uses_gets_and_the_same_power_apps_sign_in(self):
         from test_codeapp import FakePowerApps
@@ -442,14 +518,122 @@ class RapplicationPlan(unittest.TestCase):
         ws, _ = files_workspace(self.out)
         summary = {"agent": {"displayName": "Test Desk"}, "codeapp": None}
         (self.out / "rapplication.json").write_text(json.dumps(summary))
-        dp.deploy(ws, self.env, lambda: "token", dataverse=self.dv, do_publish=False, log=lambda *_: None,
+        dp.deploy(ws, self.env, lambda: DATAVERSE_TOKEN, dataverse=self.dv, do_publish=False, log=lambda *_: None,
                   files_site="https://contoso.sharepoint.com",
-                  connections={"rapp_TestDesk.shared_sharepointonline": "sp-1"})
+                  connections={"rapp_TestDesk.shared_sharepointonline": "sp-1",
+                               "rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"})
         with mock.patch.object(self.rp, "prepare", return_value=summary):
             code, out, err, _ = self.command("--json", "--files-site", "https://contoso.sharepoint.com/sites/new",
                                              "--files-folder", "/Other Documents")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(json.loads(out)["flows"]["update"], ["Test Desk JsonDoctorFlow"])
+
+    def test_expect_checks_the_workspace_after_prepare(self):
+        import shutil
+        from brainfreeze_studio import deploy as dp
+        bundle = self.out.parent / "bundle"
+        shutil.copytree(self.ref, bundle)
+        self.rp.prepare(bundle, self.out, app=False)
+        digest = dp.workspace_digest(self.out / "workspace")[:12]
+        agent = bundle / "singleton" / "invoice_router_agent.py"
+        agent.write_text(agent.read_text() + "\n# changed after approval\n")
+        with mock.patch.object(cli, "az_token", side_effect=AssertionError("no token")):
+            code, out, err = run(["rapplication", str(bundle), "--out", str(self.out), "--environment", self.env,
+                                  "--deploy", "--draft", "--no-app", "--expect", digest])
+        self.assertEqual((code, out), (1, ""))
+        now = dp.workspace_digest(self.out / "workspace")[:12]
+        self.assertNotEqual(now, digest)
+        self.assertEqual(err, f"brainfreeze-studio: the build changed since the plan "
+                             f"(digest {now}, planned {digest}); plan again\n")
+
+    def test_draft_plan_names_the_app_that_will_not_be_published(self):
+        code, out, err, _ = self.command("--draft", app=True)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("code app:     not published (--draft); run again without --draft to publish it\n", out)
+
+
+class GenericRapplicationDeploy(unittest.TestCase):
+    def test_generic_deploy_handles_a_no_app_port_with_file_readers(self):
+        from brainfreeze_studio import deploy as dp, rapplication
+        from test_deploy import (ENV, HUB_TOKEN, POWERAPPS_TOKEN, FakeDataverse, FakePowerApps, connection,
+                                 files_workspace)
+        root = Path(__file__).resolve().parent.parent
+        reader = "Reader code"
+
+        class Dataverse(FakeDataverse):
+            def __init__(self):
+                super().__init__()
+                self.t["connectors"] = {}
+
+            def __call__(self, method, path, body=None, **kw):
+                if method == "POST" and path == "connectors":
+                    self.calls.append((method, path))
+                    self.writes.append((method, path))
+                    row = dict(body, connectorid="reader", connectorinternalid="shared_reader")
+                    self.t["connectors"]["reader"] = row
+                    return row, {}
+                return super().__call__(method, path, body, **kw)
+
+        def build_port(egg, out, *args, **kw):
+            ws, wid = files_workspace(out)
+            port = ws / "connectors" / "Reader"
+            port.mkdir(parents=True)
+            (port / "connector.json").write_text(json.dumps({
+                "name": "rapp_reader", "displayName": reader, "referenceLogicalName": "rapp_TestDesk.shared_reader"}))
+            (port / "openapi.json").write_text(json.dumps({"info": {"description": "A stand-in file reader port."}}))
+            (port / "apiProperties.json").write_text('{"properties":{"connectionParameters":{}}}')
+            (port / "script.csx").write_text("public class Script {}")
+            flow = ws / "workflows" / f"JsonDoctorFlow-{wid}" / "workflow.json"
+            data = json.loads(flow.read_text())
+            placeholder = "{{CONNECTOR:Reader code}}"
+            data["properties"]["connectionReferences"]["shared_reader"] = {
+                "api": {"name": placeholder}, "connection": {"connectionReferenceLogicalName": "rapp_TestDesk.shared_reader"}}
+            data["properties"]["definition"]["actions"]["Run"] = {
+                "type": "OpenApiConnection", "inputs": {"host": {"apiId": dp.POWERAPPS_APIS + placeholder}}}
+            flow.write_text(json.dumps(data))
+            return {"workspace": ws, "schema_name": "rapp_TestDesk", "agents": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            with mock.patch("brainfreeze_studio.build", side_effect=build_port), \
+                    mock.patch("brainfreeze_studio.codeapp.host_bundle", side_effect=AssertionError("no Node")):
+                summary = rapplication.prepare(root / "examples" / "rapplications" / "invoice_router",
+                                                out, name="Test Desk", app=False)
+            self.assertIsNone(summary["codeapp"])
+            self.assertEqual(list((out / "powerapps-flows").glob("*.json")), [])
+            dv = Dataverse()
+            pa = FakePowerApps([connection("shared_commondataserviceforapps", "dv-mine"),
+                                connection("shared_sharepointonline", "sp-mine"), connection("shared_reader", "code-mine")])
+
+            def token(resource):
+                return HUB_TOKEN if resource == cli.APIHUB else POWERAPPS_TOKEN if resource == AUDIENCE else DATAVERSE_TOKEN
+
+            with mock.patch.object(cli, "az_token", side_effect=token), \
+                    mock.patch.object(dp, "Dataverse", return_value=dv), \
+                    mock.patch.object(dp, "deploy", wraps=dp.deploy) as deployed, \
+                    mock.patch("urllib.request.urlopen", side_effect=pa):
+                code, output, err = run(["deploy", str(out / "workspace"), "--environment", ENV, "--draft", "--json",
+                                         "--files-site", "https://contoso.sharepoint.com/sites/team",
+                                         "--files-folder", "/Other Documents"])
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(deployed.call_args.kwargs["get_apihub_token"](), HUB_TOKEN)
+            result = json.loads(output)
+            self.assertEqual(result["digest"], dp.workspace_digest(out / "workspace")[:12])
+            self.assertEqual(result["connectors"][0]["internalId"], "shared_reader")
+            self.assertEqual(result["files_home"]["site"], "https://contoso.sharepoint.com/sites/team")
+            self.assertEqual(result["files_home"]["folder"], "/Other Documents")
+            refs = {r["connectionreferenceid"]: r["connectionid"] for r in dv.t["connectionreferences"].values()
+                    if r["connectionreferencelogicalname"].startswith("rapp_TestDesk.")}
+            self.assertEqual(set(refs.values()), {"dv-mine", "sp-mine", "code-mine"})
+            self.assertTrue(all(wf["statecode"] == 1 and "{{CONNECTOR" not in wf["clientdata"]
+                                for wf in dv.t["workflows"].values()))
+            self.assertFalse(any("PvaPublish" in path for _, path in dv.writes))
+            again = dp.deploy(out / "workspace", ENV, lambda: DATAVERSE_TOKEN, dataverse=dv, do_publish=False,
+                                connections={"rapp_TestDesk.shared_reader": "manual-code"}, log=lambda *_: None,
+                                get_powerapps_token=mock.Mock(side_effect=AssertionError("explicit binding wins")))
+            ref = next(r for r in again["connectionReferences"] if r["logicalName"] == "rapp_TestDesk.shared_reader")
+            self.assertEqual((ref["connectionId"], ref["source"]), ("manual-code", "explicit connections map"))
+            self.assertEqual(again["connectors"][0]["connectionOperation"], "explicit")
 
 
 class BuildMessages(unittest.TestCase):
@@ -486,7 +670,9 @@ class BuildMessages(unittest.TestCase):
         digest = hashlib.sha256(self.source.encode()).hexdigest()[:12]
         cases = [
             ("profile", self.source.replace("BABAComplianceCheck", "HackerNews"), None,
-             "no --sdk-dir: proven profiles unavailable, deployed as a reasoning-only skill"),
+             "named HackerNews but its code isn't the reviewed grail agent "
+             f"(sha256 {hashlib.sha256(self.source.replace('BABAComplianceCheck', 'HackerNews').encode()).hexdigest()[:12]}); "
+             "reasoning-only"),
             ("proof", self.source, {"agent": "BABAComplianceCheck", "flow_name": "CheckFlow"},
              "translation not proven: stand-in proof refused"),
             ("materialized", self.source, {"agent": "BABAComplianceCheck", "mode": "materialized", "source_sha256": "0" * 64},
@@ -571,12 +757,13 @@ class RapplicationMessages(unittest.TestCase):
         self.assertEqual(summary["agent"]["agents"], provenance["agents"])
         self.assertEqual(provenance["agents"][0]["note"], BuildMessages.REASON)
 
-    def test_next_adds_a_plan_without_changing_the_rapplication_hint(self):
+    def test_next_deploys_the_prepared_workspace_without_rebuilding(self):
         code, out, err = self.command("--environment", "https://chosen.crm4.dynamics.com/")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out.splitlines()[-2:], [
-            "next:         --environment https://<org>.crm.dynamics.com/ --deploy --plan",
-            "              then the same without --plan"])
+            f"next:         python3 -m brainfreeze_studio deploy {shlex.quote(str(self.out / 'workspace'))} "
+            "--environment https://chosen.crm4.dynamics.com/ --draft --plan",
+            "             then the same without --plan"])
 
 
 class AzureCli(unittest.TestCase):

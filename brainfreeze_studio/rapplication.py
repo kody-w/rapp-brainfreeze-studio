@@ -374,15 +374,20 @@ def _powerapps_flows(out, app):
 
 
 def plan(out_dir, environment, get_dataverse_token, get_powerapps_token=None, *, dataverse=None, opener=None,
-         app=True, files_site=None, files_folder=None):
+         app=True, files_site=None, files_folder=None, get_apihub_token=None, keep_extra_components=False,
+         use_shared_connection=False, expect=None, publish_agent=True):
     """Preview the agent, its app flows and the code app with GETs only. The prepared files are left untouched."""
     from . import codeapp_publish, deploy as dep
     out = Path(out_dir).expanduser()
     summary = json.loads((out / "rapplication.json").read_text())
+    digest = dep.check_digest(out / "workspace", expect)
+    dep.require_delegated_token(get_dataverse_token())
     dv = dataverse or dep.Dataverse(environment, get_dataverse_token)
     flows = _powerapps_flows(out, app)
-    result = dep._plan_workspace(dv, dep.read_workspace(out / "workspace"), extra_flows=flows,
-                                 files_site=files_site, files_folder=files_folder)
+    result = dep.plan(out / "workspace", environment, get_dataverse_token, dataverse=dv, extra_flows=flows,
+                       files_site=files_site, files_folder=files_folder, get_powerapps_token=get_powerapps_token,
+                       get_apihub_token=get_apihub_token, powerapps_opener=opener, expect=digest,
+                       keep_extra_components=keep_extra_components, use_shared_connection=use_shared_connection)
     names = {wf["name"] for wf in flows}
     result["powerappsFlows"] = {key: [n for n in values if n in names] for key, values in result["flows"].items()}
     result["codeapp"] = None
@@ -391,7 +396,9 @@ def plan(out_dir, environment, get_dataverse_token, get_powerapps_token=None, *,
     if result["agent"]["operation"] == "refuse":
         return result
     if summary.get("codeapp") and app:
-        if not get_powerapps_token:
+        if not publish_agent:
+            result["codeapp_skipped"] = "--draft"
+        elif not get_powerapps_token:
             result["codeapp"] = {"displayName": summary["codeapp"]["displayName"], "operation": "unchecked",
                                  "reason": "the read-only app lookup needs a Power Apps token"}
         else:
@@ -406,7 +413,8 @@ def plan(out_dir, environment, get_dataverse_token, get_powerapps_token=None, *,
 
 
 def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, *, log=print, publish_agent=True,
-           dataverse=None, opener=None, get_apihub_token=None, files_site=None, files_folder=None, app=True):
+           dataverse=None, opener=None, get_apihub_token=None, files_site=None, files_folder=None, app=True,
+           keep_extra_components=False, use_shared_connection=False, expect=None):
     """Deploy what prepare() wrote, as the signed-in user: the agent (brainfreeze_studio.deploy), the Power Apps
     flows, then the code app (brainfreeze_studio.codeapp_publish) when there is one, a Power Apps token and app is
     true. get_apihub_token lets the deploy make the user's own SharePoint (or other Microsoft) connection when they
@@ -415,32 +423,31 @@ def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, 
     from .codeapp_publish import publish
     out = Path(out_dir).expanduser()
     summary = json.loads((out / "rapplication.json").read_text())
+    digest = dep.check_digest(out / "workspace", expect)
+    dep.require_delegated_token(get_dataverse_token())
     dv = dataverse or dep.Dataverse(environment, get_dataverse_token)
+    app_flows = _powerapps_flows(out, app)
     agent = dep.deploy(out / "workspace", environment, get_dataverse_token, log=log, do_publish=publish_agent,
                        dataverse=dv, get_powerapps_token=get_powerapps_token, powerapps_opener=opener,
-                       get_apihub_token=get_apihub_token, files_site=files_site, files_folder=files_folder)
-    from .connector_code import fill_connectors
-    code_ids = {c["displayName"]: c["internalId"] for c in agent.get("connectors") or []}
-    if app:
-        log("flows for the code app")
-    flows = []
-    for t in _powerapps_flows(out, app):
-        t["definition"] = fill_connectors(t["definition"], code_ids)
-        if agent.get("files_home"):
-            dep.apply_files_home(t["definition"], agent["files_home"])
-        for api, logical, connector in dep.workflow_references(t["definition"]):
-            r = dep.ensure_connection_reference(dv, logical, connector, f"{summary['agent']['displayName']} - {api}")
-            log(f"   {logical}: {r['operation']}")
-        flows.append(dep.ensure_workflow(dv, t))
-        log(f"   {t['name']}: {flows[-1]['operation']}")
-    result = {"agent": agent, "powerapps_flows": flows, "codeapp": None}
-    if summary.get("codeapp") and get_powerapps_token and app:
+                       get_apihub_token=get_apihub_token, files_site=files_site, files_folder=files_folder,
+                       keep_extra_components=keep_extra_components, use_shared_connection=use_shared_connection,
+                       expect=digest, extra_flows=app_flows)
+    names = {f["name"] for f in app_flows}
+    flows = [f for f in agent["flows"] if f["name"] in names]
+    agent["flows"] = [f for f in agent["flows"] if f["name"] not in names]
+    result = {"agent": agent, "powerapps_flows": flows, "codeapp": None, "digest": digest}
+    if summary.get("codeapp") and app and not publish_agent:
+        result["codeapp_skipped"] = "--draft"
+    elif summary.get("codeapp") and get_powerapps_token and app:
         env_id = dep.environment_id(dv)
         if not env_id:
             raise dep.DeployError("couldn't read the environment id from Dataverse")
         log("code app")
         result["codeapp"] = publish(out / "codeapp", env_id, get_powerapps_token, log=log, opener=opener)
+    summary["digest"] = digest
     summary["deployed"] = {"environment": dv.environment, "botId": agent.get("botId"), "makerUrl": agent.get("makerUrl"),
-                           "powerapps_flows": flows, "codeapp": result["codeapp"], "at": utc_now()}
+                           "powerapps_flows": flows, "codeapp": result["codeapp"], "at": utc_now(),
+                           "digest": digest, "status": agent["status"],
+                           "codeapp_skipped": result.get("codeapp_skipped")}
     (out / "rapplication.json").write_text(json.dumps(summary, indent=2) + "\n")
     return result

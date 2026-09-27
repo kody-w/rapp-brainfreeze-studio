@@ -1,5 +1,6 @@
 """Deploy tests. Offline: an in-memory Dataverse that answers the queries brainfreeze_studio.deploy makes."""
 import json
+import hashlib
 import re
 import shutil
 import sys
@@ -8,6 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from copy import deepcopy
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brainfreeze_studio import deploy as dp  # noqa: E402
@@ -25,6 +27,7 @@ class FakeDataverse:
         self.t = {"connectionreferences": {}, "environmentvariabledefinitions": {}, "workflows": {}, "bots": {},
                   "botcomponents": {}}
         self.writes = []
+        self.calls = []
         self.n = 0
         self.t["connectionreferences"]["ref-env"] = {"connectionreferenceid": "ref-env", "connectionreferencelogicalname":
                                                      "shared_env_dataverse", "connectorid":
@@ -54,6 +57,7 @@ class FakeDataverse:
         return rows
 
     def __call__(self, method, path, body=None, prefer=None, headers=None, ok404=False):
+        self.calls.append((method, path))
         if method != "GET":
             self.writes.append((method, path.split("?")[0]))
         if path.startswith("RetrieveCurrentOrganization"):
@@ -162,7 +166,8 @@ class DeployTests(unittest.TestCase):
         self.dv = FakeDataverse()
 
     def run_deploy(self, **kw):
-        return dp.deploy(self.ws, ENV, lambda: "token", dataverse=self.dv, log=lambda *_: None, **kw)
+        kw.setdefault("connections", {"rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"})
+        return dp.deploy(self.ws, ENV, lambda: DATAVERSE_TOKEN, dataverse=self.dv, log=lambda *_: None, **kw)
 
     def test_the_workspace_is_read_as_the_build_lays_it_out(self):
         ws = dp.read_workspace(self.ws)
@@ -231,7 +236,7 @@ class DeployTests(unittest.TestCase):
     def test_no_connection_means_a_clear_error(self):
         self.dv.t["connectionreferences"].clear()
         with self.assertRaisesRegex(dp.DeployError, "no connection for"):
-            self.run_deploy()
+            self.run_deploy(connections={})
 
     def test_guards(self):
         with self.assertRaises(dp.DeployError):
@@ -248,6 +253,7 @@ def jwt(claims):
 
 ME, SOMEONE = "11111111-0000-0000-0000-000000000001", "22222222-0000-0000-0000-000000000002"
 POWERAPPS_TOKEN, HUB_TOKEN = jwt({"oid": ME, "aud": "https://service.powerapps.com/"}), jwt({"oid": ME})
+DATAVERSE_TOKEN = jwt({"oid": ME, "aud": ENV.rstrip("/"), "scp": "user_impersonation", "idtyp": "user"})
 SITES = [{"Name": "https://contoso.sharepoint.com/sites/team", "DisplayName": "Team"},
          {"Name": "https://contoso.sharepoint.com", "DisplayName": "Communication site"}]
 SIGN_IN_ALONE = {"token": {"type": "oauthSetting", "oAuthSettings": {"properties": {
@@ -402,7 +408,7 @@ class FilesDeployTests(unittest.TestCase):
         self.rp = FakePowerApps([connection("shared_commondataserviceforapps", "dv-mine")])
 
     def run_deploy(self, **kw):
-        return dp.deploy(self.ws, ENV, lambda: "token", dataverse=self.dv, log=lambda *_: None,
+        return dp.deploy(self.ws, ENV, lambda: DATAVERSE_TOKEN, dataverse=self.dv, log=lambda *_: None,
                          get_powerapps_token=lambda: POWERAPPS_TOKEN, get_apihub_token=lambda: HUB_TOKEN,
                          powerapps_opener=self.rp, **kw)
 
@@ -433,8 +439,9 @@ class FilesDeployTests(unittest.TestCase):
 
     def test_no_site_and_no_way_to_find_one_is_a_clear_error(self):
         with self.assertRaisesRegex(dp.DeployError, "no site was given or found"):
-            dp.deploy(self.ws, ENV, lambda: "token", dataverse=self.dv, log=lambda *_: None,
-                      connections={"rapp_TestDesk.shared_sharepointonline": "sp-1"})
+            dp.deploy(self.ws, ENV, lambda: DATAVERSE_TOKEN, dataverse=self.dv, log=lambda *_: None,
+                      connections={"rapp_TestDesk.shared_sharepointonline": "sp-1",
+                                   "rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"})
 
     def test_an_empty_default_is_filled_and_a_set_one_is_left_alone(self):
         var = {"schemaName": "rapp_X", "displayName": "X", "defaultValue": ""}
@@ -455,13 +462,15 @@ class PlanTests(unittest.TestCase):
         self.dv = FakeDataverse()
 
     def run_deploy(self, **kw):
-        return dp.deploy(self.ws, ENV, lambda: "token", dataverse=self.dv, do_publish=False, log=lambda *_: None, **kw)
+        kw.setdefault("connections", {"rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"})
+        return dp.deploy(self.ws, ENV, lambda: DATAVERSE_TOKEN, dataverse=self.dv, do_publish=False, log=lambda *_: None, **kw)
 
     def run_plan(self, **kw):
         readonly = ReadOnlyDataverse(self.dv)
         before = deepcopy(self.dv.t)
         writes = list(self.dv.writes)
-        result = dp.plan(self.ws, ENV, lambda: "token", dataverse=readonly, **kw)
+        kw.setdefault("connections", {"rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"})
+        result = dp.plan(self.ws, ENV, lambda: DATAVERSE_TOKEN, dataverse=readonly, **kw)
         self.assertEqual(self.dv.t, before)
         self.assertEqual(self.dv.writes, writes)
         return result
@@ -475,7 +484,9 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(r["flows"], {"create": ["Test Desk InvoiceRouterFlow"], "update": []})
         self.assertEqual(r["environmentVariables"], {"create": ["rapp_InvoiceApprovalLimit"], "keep": []})
         self.assertEqual(r["connectionReferences"], {"create": ["rapp_TestDesk.cr.shared_commondataserviceforapps"],
-                                                    "keep": []})
+                                                    "keep": [], "sources": {
+                                                        "rapp_TestDesk.cr.shared_commondataserviceforapps":
+                                                        "explicit connections map"}})
         self.assertEqual(self.run_deploy()["bot"], "created")
 
     def test_update_and_removals_agree_with_the_deploy(self):
@@ -505,7 +516,9 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([len(r["components"][k]) for k in ("add", "update", "remove", "keep")], [0, 0, 0, 3])
         self.assertEqual(r["flows"], {"create": [], "update": []})
         self.assertEqual(r["environmentVariables"], {"create": [], "keep": ["rapp_InvoiceApprovalLimit"]})
-        self.assertEqual(r["connectionReferences"], {"create": [], "keep": ["rapp_TestDesk.cr.shared_commondataserviceforapps"]})
+        self.assertEqual(r["connectionReferences"], {"create": [],
+                         "keep": ["rapp_TestDesk.cr.shared_commondataserviceforapps"],
+                         "sources": {"rapp_TestDesk.cr.shared_commondataserviceforapps": "explicit connections map"}})
         self.assertEqual(self.run_deploy()["bot"], "unchanged")
         self.assertEqual(self.dv.writes, [])
 
@@ -593,9 +606,230 @@ class PlanTests(unittest.TestCase):
     def test_existing_files_defaults_are_used_before_comparing_flows(self):
         self.ws, _ = files_workspace(self.root / "files")
         self.run_deploy(files_site="https://contoso.sharepoint.com",
-                        connections={"rapp_TestDesk.shared_sharepointonline": "sp-1"})
+                        connections={"rapp_TestDesk.shared_sharepointonline": "sp-1",
+                                     "rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"})
         self.assertEqual(self.run_plan()["flows"], {"create": [], "update": []})
         self.assertTrue(all(f["operation"] == "unchanged" for f in self.run_deploy()["flows"]))
+
+
+class SafetyTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.ws = make_workspace(self.root)
+        self.dv = FakeDataverse()
+        self.bindings = {"rapp_TestDesk.cr.shared_commondataserviceforapps": "conn-1"}
+
+    def deploy(self, **kw):
+        options = dict(dataverse=self.dv, connections=self.bindings, do_publish=False, log=lambda *_: None)
+        options.update(kw)
+        return dp.deploy(self.ws, ENV, lambda: DATAVERSE_TOKEN, **options)
+
+    def plan(self, **kw):
+        options = dict(dataverse=ReadOnlyDataverse(self.dv), connections=self.bindings)
+        options.update(kw)
+        return dp.plan(self.ws, ENV, lambda: DATAVERSE_TOKEN, **options)
+
+    def test_digest_covers_sorted_posix_names_hidden_files_and_exact_bytes(self):
+        root = self.root / "digest"
+        root.mkdir()
+        entries = [(".hidden", b"x"), ("a/file.bin", b"\x00\xff\r\n"), ("z.txt", b"last\n")]
+        for name, data in reversed(entries):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        framed = b""
+        for name, data in entries:
+            for part in (name.encode(), data):
+                framed += len(part).to_bytes(8, "big") + part
+        expected = hashlib.sha256(framed).hexdigest()
+        self.assertEqual(dp.workspace_digest(root), expected)
+        (root / "z.txt").touch()
+        self.assertEqual(dp.workspace_digest(root), expected)
+        (root / ".hidden").write_bytes(b"changed")
+        self.assertNotEqual(dp.workspace_digest(root), expected)
+        (root / ".hidden").write_bytes(b"x")
+        (root / "z.txt").rename(root / "renamed.txt")
+        self.assertNotEqual(dp.workspace_digest(root), expected)
+
+    def test_expect_refuses_changed_bytes_before_tokens_or_requests(self):
+        planned = dp.workspace_digest(self.ws)[:12]
+        path = self.ws / "behaviors" / "rapp_desk-help.mcs.yml"
+        path.write_text(path.read_text() + "\nchanged\n")
+        now = dp.workspace_digest(self.ws)[:12]
+        for function in (dp.plan, dp.deploy):
+            with self.subTest(function=function.__name__):
+                token = mock.Mock(side_effect=AssertionError("no token before the digest check"))
+                with self.assertRaises(dp.DeployError) as error:
+                    function(self.ws, ENV, token, dataverse=self.dv, expect=planned)
+                self.assertEqual(str(error.exception),
+                                 f"the build changed since the plan (digest {now}, planned {planned}); plan again")
+                token.assert_not_called()
+                self.assertEqual(self.dv.calls, [])
+
+    def test_plan_and_deploy_return_the_approved_digest(self):
+        plan = self.plan()
+        result = self.deploy(expect=plan["digest"])
+        self.assertEqual(result["digest"], plan["digest"])
+        self.assertRegex(result["digest"], r"^[0-9a-f]{12}$")
+        self.assertEqual(self.deploy(expect=dp.workspace_digest(self.ws))["bot"], "unchanged")
+
+    def test_classic_refusal_has_only_gets_and_no_partial_deploy(self):
+        self.dv.t["bots"]["classic"] = {"botid": "classic", "schemaname": "rapp_TestDesk", "template": "default-2.1.0"}
+        with self.assertRaisesRegex(dp.DeployError, "classic agent"):
+            self.deploy()
+        self.assertTrue(self.dv.calls)
+        self.assertTrue(all(method == "GET" for method, _ in self.dv.calls))
+        self.assertEqual(self.dv.writes, [])
+        self.assertEqual(self.dv.t["workflows"], {})
+        self.assertEqual(self.dv.t["environmentvariabledefinitions"], {})
+
+    def test_app_only_tokens_are_refused_before_any_request(self):
+        for claims in ({"idtyp": "app"}, {"roles": ["Maker"], "oid": ME}, {"scp": "User"}, {}):
+            for function in (dp.plan, dp.deploy):
+                with self.subTest(claims=claims, function=function.__name__):
+                    with self.assertRaisesRegex(dp.DeployError, "this is an app-only token; sign in as yourself"):
+                        function(self.ws, ENV, lambda: jwt(claims), dataverse=self.dv)
+                    self.assertEqual(self.dv.calls, [])
+        opener = mock.Mock(side_effect=AssertionError("no HTTP for an app-only token"))
+        dv = dp.Dataverse(ENV, lambda: jwt({"idtyp": "app"}), opener=opener)
+        with self.assertRaisesRegex(dp.DeployError, "app-only"):
+            dv.value("bots")
+        opener.assert_not_called()
+        self.assertEqual(self.plan()["agent"]["operation"], "create")
+
+    def test_reference_priority_and_shared_connection_opt_in(self):
+        connector = dp.POWERAPPS_APIS + "shared_commondataserviceforapps"
+        find = mock.Mock(return_value="mine")
+        chosen = dp.ensure_connection_reference(self.dv, "rapp_explicit", connector, "Explicit",
+                                                 {"rapp_explicit": "chosen"}, find)
+        self.assertEqual((chosen["connectionId"], chosen["source"]), ("chosen", "explicit connections map"))
+        find.assert_not_called()
+        kept = dp.ensure_connection_reference(self.dv, "rapp_explicit", connector, "Explicit", find_connection=find)
+        self.assertEqual((kept["connectionId"], kept["source"]), ("chosen", "existing binding"))
+        find.assert_not_called()
+        mine = dp.ensure_connection_reference(self.dv, "rapp_mine", connector, "Mine", find_connection=find)
+        self.assertEqual((mine["connectionId"], mine["source"]), ("mine", "your connection"))
+        before = list(self.dv.writes)
+        with self.assertRaisesRegex(dp.DeployError, "create one in Power Apps .*as this user"):
+            dp.ensure_connection_reference(self.dv, "rapp_shared", connector, "Shared")
+        self.assertEqual(self.dv.writes, before)
+        shared = dp.ensure_connection_reference(self.dv, "rapp_shared", connector, "Shared", use_shared_connection=True)
+        self.assertEqual((shared["connectionId"], shared["source"]), ("conn-1", "shared connection (not yours)"))
+
+    def test_plan_reports_sources_without_using_someone_elses_connection(self):
+        logical = "rapp_TestDesk.cr.shared_commondataserviceforapps"
+        api = "shared_commondataserviceforapps"
+        self.assertEqual(self.plan()["connectionReferences"]["sources"][logical], "explicit connections map")
+        refused = self.plan(connections={})
+        self.assertEqual(refused["agent"]["operation"], "refuse")
+        self.assertIn("create one in Power Apps", refused["agent"]["reason"])
+        shared = self.plan(connections={}, use_shared_connection=True)
+        self.assertEqual(shared["connectionReferences"]["sources"][logical], "shared connection (not yours)")
+        pa = FakePowerApps([connection(api, "mine")])
+        mine = self.plan(connections={}, get_powerapps_token=lambda: POWERAPPS_TOKEN, powerapps_opener=pa)
+        self.assertEqual(mine["connectionReferences"]["sources"][logical], "your connection")
+        self.assertTrue(all(method == "GET" for method, *_ in pa.requests))
+        self.deploy()
+        self.assertEqual(self.plan(connections={})["connectionReferences"]["sources"][logical], "existing binding")
+
+    def test_code_connections_are_reused_only_for_the_same_owner(self):
+        for owner, operation in ((SOMEONE, "created"), (ME, "existing")):
+            calls = []
+
+            def opener(req, timeout=None):
+                calls.append(req.get_method())
+                return _Reply({"value": [{"name": "a-connection", "properties": {
+                    "createdBy": {"id": owner}, "statuses": [{"status": "Connected"}]}}]})
+
+            with self.subTest(owner=owner):
+                name, actual = dp.ensure_code_connection(lambda: POWERAPPS_TOKEN, "env-1", "custom_code", "Code",
+                                                          opener=opener, wait=0)
+                self.assertEqual(actual, operation)
+                self.assertEqual(calls, ["GET"] if owner == ME else ["GET", "PUT"])
+                self.assertEqual(name == "a-connection", owner == ME)
+
+    def test_draft_status_is_exact_and_is_logged_before_writes(self):
+        messages = []
+
+        def log(message):
+            if message.startswith("status:"):
+                self.assertEqual(self.dv.writes, [])
+                messages.append(message)
+
+        first = self.deploy(log=log)
+        self.assertEqual(messages, ["status:      Draft: new agent, not published"])
+        self.assertEqual(self.plan()["status"], "Draft: not published")
+        bot = self.dv.t["bots"][first["botId"]]
+        bot["publishedon"] = "2026-09-26T10:00:00Z"
+        path = self.ws / "workflows" / f"InvoiceRouterFlow-{WF_ID}" / "workflow.json"
+        definition = json.loads(path.read_text())
+        definition["properties"]["definition"]["actions"]["Changed"] = {"type": "Compose", "inputs": "new"}
+        path.write_text(json.dumps(definition))
+        expected = ("Draft changes to an agent published 2026-09-26T10:00:00Z: its published version keeps its old "
+                    "settings until you publish, but the 1 flows changed now and it already uses them")
+        self.assertEqual(self.plan()["status"], expected)
+        self.dv.writes.clear()
+        messages.clear()
+        result = self.deploy(log=log)
+        self.assertEqual(messages, ["status:      " + expected])
+        self.assertEqual(result["status"], expected)
+        self.assertEqual(result["flows"][0]["operation"], "updated")
+        self.assertFalse(any("PvaPublish" in path for _, path in self.dv.writes))
+
+    def test_readback_rejects_corrupt_content_links_bindings_and_missing_variables(self):
+        class Corrupting(FakeDataverse):
+            def __init__(self, mode):
+                super().__init__()
+                self.mode = mode
+
+            def __call__(self, method, path, body=None, **kw):
+                reply = super().__call__(method, path, body, **kw)
+                if method == "POST" and path == "botcomponents" and "InlineAgentSkill" in body["data"]:
+                    row = next(r for r in self.t["botcomponents"].values() if r["schemaname"] == body["schemaname"])
+                    if self.mode == "data":
+                        row["data"] += "\nwrong content"
+                    if self.mode == "description":
+                        row["description"] = "wrong description"
+                if method == "POST" and path.endswith("/botcomponent_workflow/$ref") and self.mode == "link":
+                    id_ = path.split("(", 1)[1].split(")", 1)[0]
+                    self.t["botcomponents"][id_]["botcomponent_workflow"] = [{"workflowid": "wrong-flow"}]
+                if method == "PATCH" and path == f"workflows({WF_ID})" and body.get("statecode") == 1:
+                    if self.mode == "flow":
+                        self.t["workflows"][WF_ID]["clientdata"] = '{"properties":{"definition":{"actions":{"wrong":{}}}}}'
+                    if self.mode == "inactive":
+                        self.t["workflows"][WF_ID]["statecode"] = 0
+                if method == "POST" and path == "connectionreferences" and self.mode == "binding":
+                    row = next(r for r in self.t[path].values() if r["connectionreferencelogicalname"] ==
+                               body["connectionreferencelogicalname"])
+                    row["connectionid"] = "wrong-connection"
+                if method == "POST" and path == "environmentvariabledefinitions" and self.mode == "variable":
+                    self.t[path].clear()
+                return reply
+
+        cases = {"data": "component data differs.*rapp_desk-help", "description": "component description differs",
+                 "link": "workflow link differs.*InvoiceRouterFlow", "flow": "flow definition differs.*InvoiceRouterFlow",
+                 "inactive": "flow is not active", "binding": "connection binding differs",
+                 "variable": "environment variable missing.*rapp_InvoiceApprovalLimit"}
+        for mode, error in cases.items():
+            with self.subTest(mode=mode):
+                dv = Corrupting(mode)
+                with self.assertRaisesRegex(dp.DeployError, error):
+                    self.deploy(dataverse=dv, do_publish=True)
+                self.assertFalse(any("PvaPublish" in path for _, path in dv.writes))
+
+    def test_readback_accepts_only_the_allowed_text_and_json_normalization(self):
+        self.deploy()
+        for row in self.dv.t["botcomponents"].values():
+            row["data"] = row["data"].replace("\n", " \t\r\n") + " \t\r\n"
+        wf = self.dv.t["workflows"][WF_ID]
+        definition = json.loads(wf["clientdata"])
+        definition["properties"]["templateName"] = "server metadata"
+        wf["clientdata"] = json.dumps(definition, indent=2, sort_keys=True)
+        self.dv.writes.clear()
+        self.assertEqual(self.deploy()["bot"], "unchanged")
+        self.assertEqual(self.dv.writes, [])
 
 
 if __name__ == "__main__":

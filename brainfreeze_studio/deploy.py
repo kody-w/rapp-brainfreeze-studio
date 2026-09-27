@@ -14,10 +14,12 @@ PvaPublish message. The order is the copilot-harness-sdk deploy's:
 4. the harness bot, with its instructions
 5. tools and skills, linked to their flows and references
 6. stale components removed
-7. publish, then read back
+7. compare the stored content, then publish
 
+The workspace digest, delegated sign-in and existing agent's harness identity are checked before any write.
 It is idempotent: a re-run updates what changed and leaves the rest alone.
 """
+import hashlib
 import json
 import re
 import time
@@ -37,6 +39,38 @@ ENV_VAR_TYPES = {"String": 100000000, "Number": 100000001, "Boolean": 100000002,
 
 class DeployError(RuntimeError):
     pass
+
+
+def workspace_digest(workspace):
+    """SHA-256 of sorted POSIX paths and file bytes, framed by their lengths."""
+    root = Path(workspace).expanduser()
+    if not root.is_dir():
+        raise DeployError(f"{root} is not a workspace directory")
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+        if path.is_symlink():
+            raise DeployError(f"workspace contains a symlink: {path.relative_to(root).as_posix()}")
+        if path.is_file():
+            name, data = path.relative_to(root).as_posix().encode("utf-8"), path.read_bytes()
+            for part in (name, data):
+                digest.update(len(part).to_bytes(8, "big"))
+                digest.update(part)
+    return digest.hexdigest()
+
+
+def check_digest(workspace, expect=None):
+    full = workspace_digest(workspace)
+    digest = full[:12]
+    if expect is not None and expect.lower() not in (digest, full):
+        raise DeployError(f"the build changed since the plan (digest {digest}, planned {expect}); plan again")
+    return digest
+
+
+def require_delegated_token(token):
+    """The Function's delegated-scope rule; the service still verifies the token and its signature."""
+    if "user_impersonation" not in str(_token_claims(token).get("scp", "")).split():
+        raise DeployError("this is an app-only token; sign in as yourself (az login)")
+    return token
 
 
 class Dataverse:
@@ -59,7 +93,7 @@ class Dataverse:
             hdrs["Prefer"] = prefer
         hdrs.update(headers or {})
         for attempt in range(self.retries + 1):
-            hdrs["Authorization"] = "Bearer " + self.get_token()
+            hdrs["Authorization"] = "Bearer " + require_delegated_token(self.get_token())
             req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
             try:
                 with self.urlopen(req, timeout=self.timeout) as r:
@@ -259,30 +293,47 @@ def _connection_reference(dv, logical):
     return rows[0] if rows else None
 
 
-def ensure_connection_reference(dv, logical, connector_id, display_name, connections=None, find_connection=None):
+def _shared_connection(dv, connector_id):
+    rows = dv.value(f"connectionreferences?$filter=connectorid eq '{_q(connector_id)}' and connectionid ne null"
+                    "&$select=connectionid,connectionreferencelogicalname&$orderby=createdon asc&$top=1")
+    return rows[0]["connectionid"] if rows else None
+
+
+def _missing_connection(logical, connector_id):
+    return DeployError(f"no connection for {logical} ({connector_id}): create one in Power Apps (Connections) "
+                       "as this user, then deploy again")
+
+
+def ensure_connection_reference(dv, logical, connector_id, display_name, connections=None, find_connection=None,
+                                use_shared_connection=False):
     """An agent-scoped reference bound to a connection this user can use: an explicit map entry, else the reference
-    itself if already bound, else one of the user's own (find_connection, when given), else any bound reference for
-    the same connector in the environment."""
+    itself if already bound, else one of the user's own (find_connection, when given). A shared connection is used
+    only with use_shared_connection=True, and is reported as not the user's own."""
     existing = _connection_reference(dv, logical)
     connection = (connections or {}).get(logical) or (connections or {}).get(connector_id or "")
+    source = "explicit connections map" if connection else None
     if not connection and existing and existing.get("connectionid"):
-        return {"logicalName": logical, "operation": "existing", "connectionId": existing["connectionid"]}
+        return {"logicalName": logical, "operation": "existing", "connectionId": existing["connectionid"],
+                "source": "existing binding"}
     if not connection and find_connection and connector_id:
         connection = find_connection(connector_id)
-    if not connection and connector_id:
-        rows = dv.value(f"connectionreferences?$filter=connectorid eq '{_q(connector_id)}' and connectionid ne null"
-                        "&$select=connectionid,connectionreferencelogicalname&$orderby=createdon asc&$top=1")
-        connection = rows[0]["connectionid"] if rows else None
+        if connection:
+            source = "your connection"
+    if not connection and connector_id and use_shared_connection:
+        connection = _shared_connection(dv, connector_id)
+        if connection:
+            source = "shared connection (not yours)"
     if not connection:
-        raise DeployError(f"no connection for {logical} ({connector_id}): create one in Power Apps (Connections) "
-                          "as this user, then deploy again")
+        raise _missing_connection(logical, connector_id)
+    if existing and existing.get("connectionid") == connection and existing.get("connectorid") == connector_id:
+        return {"logicalName": logical, "operation": "existing", "connectionId": connection, "source": source}
     body = {"connectionreferencedisplayname": display_name, "connectionreferencelogicalname": logical,
             "connectorid": connector_id, "connectionid": connection}
     if existing:
         dv("PATCH", f"connectionreferences({existing['connectionreferenceid']})", body)
-        return {"logicalName": logical, "operation": "updated", "connectionId": connection}
+        return {"logicalName": logical, "operation": "updated", "connectionId": connection, "source": source}
     dv("POST", "connectionreferences", body)
-    return {"logicalName": logical, "operation": "created", "connectionId": connection}
+    return {"logicalName": logical, "operation": "created", "connectionId": connection, "source": source}
 
 
 def _environment_variable(dv, schema_name):
@@ -311,12 +362,23 @@ def ensure_environment_variable(dv, var):
 def _stored_definition(clientdata):
     """A stored flow definition without the field Power Automate adds on save (each connection reference's
     api.logicalName), so an unchanged flow compares equal to the workspace's copy."""
+    if clientdata is not None and not isinstance(clientdata, str):
+        raise ValueError("flow clientdata is not JSON text")
     stored = json.loads(clientdata or "null")
+    if not isinstance(stored, dict) or not isinstance(stored.get("properties"), dict):
+        raise ValueError("flow clientdata has no properties object")
     refs = ((stored or {}).get("properties") or {}).get("connectionReferences") or {}
+    if not isinstance(refs, dict):
+        raise ValueError("flow connectionReferences is not an object")
     for ref in refs.values():
         if isinstance(ref, dict) and isinstance(ref.get("api"), dict):
             ref["api"].pop("logicalName", None)
     return stored
+
+
+def _flow_content(definition):
+    props = definition["properties"]
+    return {"definition": props.get("definition"), "connectionReferences": props.get("connectionReferences") or {}}
 
 
 def _connector(dv, name):
@@ -369,9 +431,9 @@ def ensure_code_connection(get_powerapps_token, environment_id, internal, displa
     for attempt in range(6):                  # a connector made a moment ago can take a little while to appear
         try:
             listed = api.call("GET", f"/apis/{internal}/connections?api-version=2016-11-01&$filter={where}") or {}
-            for conn in listed.get("value") or []:
-                if any(st.get("status") == "Connected" for st in (conn.get("properties") or {}).get("statuses") or []):
-                    return conn["name"], "existing"
+            conn = _own_connection(listed.get("value") or [], get_powerapps_token())
+            if conn:
+                return conn["name"], "existing"
             name = uuid.uuid4().hex
             api.call("PUT", f"/apis/{internal}/connections/{name}?api-version=2016-11-01&$filter={where}", body)
             return name, "created"
@@ -388,8 +450,9 @@ def _token_claims(token):
     import base64
     try:
         part = token.split(".")[1]
-        return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
-    except (IndexError, ValueError):
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+        return claims if isinstance(claims, dict) else {}
+    except (AttributeError, IndexError, ValueError):
         return {}
 
 
@@ -431,7 +494,16 @@ def _connected(conn):
     return any(st.get("status") == "Connected" for st in (conn.get("properties") or {}).get("statuses") or [])
 
 
-def user_connection(get_powerapps_token, environment_id, api, get_apihub_token=None, opener=None, wait=3):
+def _own_connection(connections, token):
+    me = _token_claims(token).get("oid")
+    mine = [c for c in connections
+            if me and ((c.get("properties") or {}).get("createdBy") or {}).get("id") == me and _connected(c)]
+    mine.sort(key=lambda c: (c.get("properties") or {}).get("lastModifiedTime") or "", reverse=True)
+    return mine[0] if mine else None
+
+
+def user_connection(get_powerapps_token, environment_id, api, get_apihub_token=None, opener=None, wait=3, *,
+                    create=True):
     """A connection of the user's own to a Microsoft connector (SharePoint, Dataverse, ...): a connected one they
     made, else a new one made with their sign-in alone when the connector allows it. That is the Power Apps
     first-party login: the connection offers a login address and API Hub exchanges the user's token (for
@@ -441,19 +513,18 @@ def user_connection(get_powerapps_token, environment_id, api, get_apihub_token=N
     from .codeapp_publish import PublishError, _Api
     rp = _Api(get_powerapps_token, opener)
     where = urllib.parse.quote(f"environment eq '{environment_id}'")
-    me = _token_claims(get_powerapps_token()).get("oid")
     listed = rp.call("GET", f"/apis/{api}/connections?api-version=2016-11-01&$filter={where}") or {}
-    mine = [c for c in listed.get("value") or []
-            if me and ((c.get("properties") or {}).get("createdBy") or {}).get("id") == me and _connected(c)]
+    mine = _own_connection(listed.get("value") or [], get_powerapps_token())
     if mine:
-        mine.sort(key=lambda c: (c.get("properties") or {}).get("lastModifiedTime") or "", reverse=True)
-        return mine[0]["name"], "existing"
+        return mine["name"], "existing"
     if not get_apihub_token:
         return None, "you have no connected connection, and there is no API Hub token to make one with"
     connector = rp.call("GET", f"/apis/{api}?api-version=2016-11-01&$filter={where}") or {}
     eligible, parameter_set = silent_sign_in(connector)
     if not eligible:
         return None, "its connections need an interactive sign-in"
+    if not create:
+        return None, "created at deploy"
     name = str(uuid.uuid4())
     display = f"{(connector.get('properties') or {}).get('displayName') or api} (RAPP)"
     props = {"displayName": display, "consentInfo": {"redirectUrl": "https://www.microsoft.com/"},
@@ -519,7 +590,7 @@ def _workflow_state(dv, wf):
     if not cur:
         return None, False
     try:            # compare definitions, not strings: Dataverse stores the JSON reformatted
-        same = _stored_definition(cur.get("clientdata")) == wf["definition"]
+        same = _flow_content(_stored_definition(cur.get("clientdata"))) == _flow_content(wf["definition"])
     except ValueError:
         same = False
     return cur, (cur.get("statecode") == 1 and same and cur.get("name") == wf["name"]
@@ -548,7 +619,7 @@ def ensure_workflow(dv, wf):
 
 def _bot_state(dv, schema_name, display_name, settings):
     config = json.dumps(bot_configuration(settings))
-    rows = dv.value(f"bots?$filter=schemaname eq '{_q(schema_name)}'&$select=botid,template,configuration,name")
+    rows = dv.value(f"bots?$filter=schemaname eq '{_q(schema_name)}'&$select=botid,template,configuration,name,publishedon")
     fields = {"name": display_name, "configuration": config,
               "authenticationmode": AUTH_MODES.get(settings["authenticationMode"], 2),
               "authenticationtrigger": AUTH_TRIGGERS.get(settings["authenticationTrigger"], 1),
@@ -590,7 +661,11 @@ def _component_fields(c):
 
 
 def _component_changed(c, cur):
-    return any((cur.get(k) or "") != (v or "") for k, v in _component_fields(c).items())
+    data = cur.get("data")
+    return ((data is not None and not isinstance(data, str))
+            or any((cur.get(k) or "") != (c[field] or "") for k, field in
+                (("name", "displayName"), ("description", "description")))
+            or _component_text(cur.get("data")) != _component_text(c["data"]))
 
 
 def ensure_component(dv, bot_id, schema_name, c, live):
@@ -709,8 +784,45 @@ def environment_id(dv):
         return None
 
 
+def draft_status(bot, changed_flows=0):
+    if not bot:
+        return "Draft: new agent, not published"
+    if not bot.get("publishedon"):
+        return "Draft: not published"
+    return (f"Draft changes to an agent published {bot['publishedon']}: its published version keeps its old settings "
+            f"until you publish, but the {changed_flows} flows changed now and it already uses them")
+
+
+def _plan_reference(dv, logical, connector, connections, get_powerapps_token, get_apihub_token, env, opener,
+                    use_shared_connection, code_references):
+    existing = _connection_reference(dv, logical)
+    connection = (connections or {}).get(logical) or (connections or {}).get(connector or "")
+    if connection:
+        source = "explicit connections map"
+    elif logical in code_references:
+        source = "your connection"
+    elif existing and existing.get("connectionid"):
+        connection, source = existing["connectionid"], "existing binding"
+    else:
+        source = None
+        api = connector[len(POWERAPPS_APIS):] if connector and connector.startswith(POWERAPPS_APIS) else ""
+        if get_powerapps_token and api.startswith("shared_"):
+            connection, how = user_connection(get_powerapps_token, env(), api, get_apihub_token, opener, create=False)
+            if connection or how == "created at deploy":
+                source = "your connection"
+        if not source and connector and use_shared_connection:
+            connection = _shared_connection(dv, connector)
+            if connection:
+                source = "shared connection (not yours)"
+        if not source:
+            raise _missing_connection(logical, connector)
+    return {"logicalName": logical, "connectionId": connection, "source": source,
+            "operation": "keep" if existing else "create"}
+
+
 def _plan_workspace(dv, ws, *, schema_name=None, display_name=None, keep_extra_components=False, extra_flows=(),
-                    files_site=None, files_folder=None):
+                    files_site=None, files_folder=None, connections=None, get_powerapps_token=None,
+                    get_apihub_token=None, powerapps_opener=None, use_shared_connection=False):
     settings = ws["settings"]
     schema = schema_name or settings["schemaName"]
     name = display_name or settings["displayName"] or schema
@@ -718,10 +830,13 @@ def _plan_workspace(dv, ws, *, schema_name=None, display_name=None, keep_extra_c
               "components": {"add": [], "update": [], "remove": [], "keep": []},
               "flows": {"create": [], "update": []},
               "environmentVariables": {"create": [], "keep": []},
-              "connectionReferences": {"create": [], "keep": []}}
+              "connectionReferences": {"create": [], "keep": [], "sources": {}},
+              "keepExtraComponents": keep_extra_components, "keptExtraComponents": []}
     try:
         schema, name = _agent_names(settings, schema_name, display_name)
         bot, _, operation = _bot_state(dv, schema, name, settings)
+        if bot:
+            result["agent"].update(existingDisplayName=bot.get("name") or schema, publishedOn=bot.get("publishedon"))
         live = list_components(dv, bot["botid"]) if bot else {}
         expected = {component_schema_name(schema, c).lower() for c in ws["components"]}
         workflow_ids = {wf["id"].lower() for wf in ws["workflows"]}
@@ -736,14 +851,37 @@ def _plan_workspace(dv, ws, *, schema_name=None, display_name=None, keep_extra_c
             result["components"][action].append(key)
         extras = _extra_components(live, expected)
         result["components"]["keep" if keep_extra_components else "remove"].extend(r["schemaname"] for r in extras)
+        if keep_extra_components:
+            result["keptExtraComponents"] = [r["schemaname"] for r in extras]
 
-        references = dict(ws["connection_references"])
+        if ws["connectors"] and not get_powerapps_token:
+            raise DeployError("this workspace runs agent logic as connector code; its connections are made with your "
+                              "Power Apps token (https://service.powerapps.com/), which wasn't given")
+        ids = {}
+        for c in ws["connectors"]:
+            existing = _connector(dv, c["name"])
+            if existing:
+                ids[c["displayName"]] = existing["connectorinternalid"]
+        from .connector_code import fill_connectors
+        references = {k: fill_connectors(v, ids) for k, v in ws["connection_references"].items()}
         for wf in extra_flows:
-            for _, logical, connector in workflow_references(wf["definition"]):
+            for _, logical, connector in workflow_references(fill_connectors(wf["definition"], ids)):
                 references[logical] = references.get(logical) or connector
-        for logical in sorted(references):
-            action = "keep" if _connection_reference(dv, logical) else "create"
-            result["connectionReferences"][action].append(logical)
+        env_cache = {}
+
+        def env():
+            if "id" not in env_cache:
+                env_cache["id"] = environment_id(dv)
+            return env_cache["id"]
+
+        chosen = []
+        code_references = {c["referenceLogicalName"] for c in ws["connectors"]}
+        for logical, connector in sorted(references.items()):
+            ref = _plan_reference(dv, logical, connector, connections, get_powerapps_token, get_apihub_token, env,
+                                  powerapps_opener, use_shared_connection, code_references)
+            chosen.append(ref)
+            result["connectionReferences"][ref["operation"]].append(logical)
+            result["connectionReferences"]["sources"][logical] = ref["source"]
         home = {"site": files_site, "folder": files_folder, "schemas": {}}
         for v in ws["environment_variables"]:
             existing = _environment_variable(dv, v["schemaName"])
@@ -752,12 +890,13 @@ def _plan_workspace(dv, ws, *, schema_name=None, display_name=None, keep_extra_c
                 home["schemas"][v["schemaName"]] = v["files"]
                 home[v["files"]] = (home.get(v["files"]) or (existing or {}).get("defaultvalue")
                                     or v.get("defaultValue") or "")
-        ids = {}
-        for c in ws["connectors"]:
-            existing = _connector(dv, c["name"])
-            if existing:
-                ids[c["displayName"]] = existing["connectorinternalid"]
-        from .connector_code import fill_connectors
+        if home["schemas"] and not home.get("site") and get_powerapps_token and get_apihub_token:
+            sp = next((r for r in chosen if r["logicalName"].endswith(".shared_sharepointonline")
+                       and r["connectionId"]), None)
+            if sp:
+                home["site"] = root_site(sharepoint_sites(get_powerapps_token, get_apihub_token, env(),
+                                                         sp["connectionId"], powerapps_opener)) or ""
+        changed_agent_flows = 0
         for wf in [*ws["workflows"], *extra_flows]:
             wf["definition"] = fill_connectors(wf["definition"], ids)
             if home["schemas"]:
@@ -765,37 +904,119 @@ def _plan_workspace(dv, ws, *, schema_name=None, display_name=None, keep_extra_c
             cur, same = _workflow_state(dv, wf)
             if not same:
                 result["flows"]["update" if cur else "create"].append(wf["name"])
+                if cur and wf["id"].lower() in workflow_ids:
+                    changed_agent_flows += 1
         result["agent"]["operation"] = operation
+        result["status"] = draft_status(bot, changed_agent_flows)
     except DeployError as e:
         result["agent"]["reason"] = str(e)
     return result
 
 
 def plan(workspace, environment, get_token, *, schema_name=None, display_name=None, dataverse=None,
-         keep_extra_components=False):
+         keep_extra_components=False, expect=None, connections=None, get_powerapps_token=None,
+         get_apihub_token=None, powerapps_opener=None, files_site=None, files_folder=None,
+         use_shared_connection=False, extra_flows=()):
     """A GET-only snapshot of the deploy's agent, component and flow changes. Names and comparisons are shared
     with deploy(). Existing setting rows are kept; deploy may fill their missing defaults or connection bindings."""
+    digest = check_digest(workspace, expect)
     ws = read_workspace(workspace)
+    require_delegated_token(get_token())
     dv = dataverse or Dataverse(environment, get_token)
-    return _plan_workspace(dv, ws, schema_name=schema_name, display_name=display_name,
-                           keep_extra_components=keep_extra_components)
+    result = _plan_workspace(dv, ws, schema_name=schema_name, display_name=display_name,
+                             keep_extra_components=keep_extra_components, extra_flows=extra_flows,
+                             files_site=files_site, files_folder=files_folder, connections=connections,
+                             get_powerapps_token=get_powerapps_token, get_apihub_token=get_apihub_token,
+                             powerapps_opener=powerapps_opener, use_shared_connection=use_shared_connection)
+    result["digest"] = digest
+    return result
+
+
+def _component_text(text):
+    return "\n".join(line.rstrip() for line in (text or "").replace("\r\n", "\n").split("\n")).rstrip()
+
+
+def _verify_workspace(dv, bot_id, schema, ws, workflows, references, variables, template):
+    bot, _ = dv("GET", f"bots({bot_id})?$select=template,configuration,publishedon,statuscode")
+    comps = list_components(dv, bot_id)
+    for c in ws["components"]:
+        name = component_schema_name(schema, c)
+        live = comps.get(name.lower())
+        if not live:
+            raise DeployError(f"component missing on the live record: {name}")
+        data = live.get("data")
+        if (data is not None and not isinstance(data, str)) or _component_text(data) != _component_text(c["data"]):
+            raise DeployError(f"component data differs on the live record: {name}")
+        if (live.get("description") or "") != c["description"]:
+            raise DeployError(f"component description differs on the live record: {name}")
+        if c["kind"] == "WorkflowTool":
+            links = {w["workflowid"].lower() for w in live.get("botcomponent_workflow") or []}
+            if not c["workflowId"] or links != {c["workflowId"].lower()}:
+                raise DeployError(f"workflow link differs on the live record: {name} (expected {c['workflowId']})")
+    for wf in workflows:
+        live, _ = _workflow_state(dv, wf)
+        if not live:
+            raise DeployError(f"flow missing on the live record: {wf['name']}")
+        if live.get("statecode") != 1:
+            raise DeployError(f"flow is not active on the live record: {wf['name']}")
+        try:
+            same = _flow_content(_stored_definition(live.get("clientdata"))) == _flow_content(wf["definition"])
+        except ValueError:
+            same = False
+        if not same:
+            raise DeployError(f"flow definition differs on the live record: {wf['name']}")
+    for ref in references:
+        live = _connection_reference(dv, ref["logicalName"])
+        if not live or live.get("connectionid") != ref["connectionId"]:
+            raise DeployError(f"connection binding differs on the live record: {ref['logicalName']}")
+    for var in variables:
+        if not _environment_variable(dv, var["schemaName"]):
+            raise DeployError(f"environment variable missing on the live record: {var['schemaName']}")
+    try:
+        instructions = json.loads(bot["configuration"])["agentSettings"]["instructions"]["segments"][0]["value"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise DeployError(f"the live bot has no harness instructions: {schema}") from None
+    if bot.get("template") != template or instructions != ws["settings"]["instructions"]:
+        raise DeployError(f"the live bot is not the harness agent this workspace describes: {schema}")
+    return bot, comps
 
 
 def deploy(workspace, environment, get_token, *, schema_name=None, display_name=None, connections=None,
            keep_extra_components=False, do_publish=True, log=print, dataverse=None, get_powerapps_token=None,
-           powerapps_opener=None, get_apihub_token=None, files_site=None, files_folder=None):
+           powerapps_opener=None, get_apihub_token=None, files_site=None, files_folder=None, expect=None,
+           use_shared_connection=False, extra_flows=()):
     """Deploy a harness workspace as the user whose token get_token() returns. Returns a summary dict. A workspace
     with connector code (workspace/connectors/) also needs get_powerapps_token, for the connectors' connections.
     With it, a flow's Microsoft connector (SharePoint, Dataverse, ...) is bound to a connection of the user's own,
     made with their sign-in alone when they have none and get_apihub_token is given. Agents that read files find
     them in files_site/files_folder (default: the build's, else the environment's, else the tenant's root site)."""
+    digest = check_digest(workspace, expect)
     ws = read_workspace(workspace)
     settings = ws["settings"]
     schema, name = _agent_names(settings, schema_name, display_name)
+    require_delegated_token(get_token())
     dv = dataverse or Dataverse(environment, get_token)
-    result = {"schemaName": schema, "displayName": name, "environment": dv.environment}
+    before, _, _ = _bot_state(dv, schema, name, settings)
+    preview = _plan_workspace(dv, ws, schema_name=schema, display_name=name, connections=connections,
+                              keep_extra_components=keep_extra_components, extra_flows=extra_flows,
+                              get_powerapps_token=get_powerapps_token, get_apihub_token=get_apihub_token,
+                              powerapps_opener=powerapps_opener, files_site=files_site, files_folder=files_folder,
+                              use_shared_connection=use_shared_connection)
+    if preview["agent"]["operation"] == "refuse":
+        raise DeployError(preview["agent"]["reason"])
+    check_digest(workspace, digest)
+    result = {"schemaName": schema, "displayName": name, "environment": dv.environment,
+              "digest": digest, "status": preview["status"]}
+    log(f"digest:      {digest}")
+    log(f"agent:       {name}  ({schema})")
+    log(f"status:      {preview['status']}")
+    workflows = [*ws["workflows"], *extra_flows]
+    for wf in extra_flows:
+        for _, logical, connector in workflow_references(wf["definition"]):
+            ws["connection_references"][logical] = ws["connection_references"].get(logical) or connector
 
     code = []
+    own_code_references = set()
     if ws["connectors"]:
         from .connector_code import fill_connectors
         log("0/7 custom connectors (the agents' logic, as connector code)")
@@ -806,8 +1027,13 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
         ids, connections = {}, dict(connections or {})
         for c in ws["connectors"]:
             internal, op = ensure_connector(dv, c)
-            conn, conn_op = ensure_code_connection(get_powerapps_token, env_id, internal, c["displayName"],
-                                                   opener=powerapps_opener)
+            conn = connections.get(c["referenceLogicalName"]) or connections.get(POWERAPPS_APIS + internal)
+            if conn:
+                conn_op = "explicit"
+            else:
+                conn, conn_op = ensure_code_connection(get_powerapps_token, env_id, internal, c["displayName"],
+                                                       opener=powerapps_opener)
+                own_code_references.add(c["referenceLogicalName"])
             ids[c["displayName"]] = internal
             connections[c["referenceLogicalName"]] = conn
             code.append({"displayName": c["displayName"], "internalId": internal, "operation": op,
@@ -815,7 +1041,7 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
             log(f"   {c['displayName']}: {op} ({internal}); connection {conn_op}")
             if op == "created":
                 log("   (a new connector's code can take a few minutes to answer; until then its calls fail with 404)")
-        for wf in ws["workflows"]:
+        for wf in workflows:
             wf["definition"] = fill_connectors(wf["definition"], ids)
         ws["connection_references"] = {k: fill_connectors(v, ids) for k, v in ws["connection_references"].items()}
     result["connectors"] = code
@@ -840,8 +1066,11 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
     for logical, connector in sorted(ws["connection_references"].items()):
         references.append(ensure_connection_reference(dv, logical, connector, f"{name} - {logical.split('.')[-1]}",
                                                       connections,
-                                                      find_connection=find_connection if get_powerapps_token else None))
-        log(f"   {logical}: {references[-1]['operation']}")
+                                                      find_connection=find_connection if get_powerapps_token else None,
+                                                      use_shared_connection=use_shared_connection))
+        if logical in own_code_references:
+            references[-1]["source"] = "your connection"
+        log(f"   {logical}: {references[-1]['operation']} ({references[-1]['source']})")
     reference_ids = {}
     for r in references:
         rows = dv.value(f"connectionreferences?$filter=connectionreferencelogicalname eq '{_q(r['logicalName'])}'"
@@ -853,16 +1082,16 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
                       powerapps_opener)
     if home:
         log(f"   files: {home['site']} {home['folder']}")
-        for wf in ws["workflows"]:
+        for wf in workflows:
             apply_files_home(wf["definition"], home)
     result["files_home"] = home
     variables = [ensure_environment_variable(dv, v) for v in ws["environment_variables"]]
     for v in variables:
         log(f"   {v['schemaName']}: {v['operation']}")
 
-    log("3/7 agent flows")
+    log("3/7 flows")
     flows = []
-    for wf in ws["workflows"]:
+    for wf in workflows:
         flows.append(ensure_workflow(dv, wf))
         log(f"   {wf['name']}: {flows[-1]['operation']}")
     workflow_ids = {wf["id"].lower() for wf in ws["workflows"]}
@@ -889,24 +1118,18 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
             removed.append(row["schemaname"])
     log(f"   {'removed ' + ', '.join(removed) if removed else 'none'}")
 
-    log("7/7 publish and read back")
+    log("7/7 read back and publish")
+    bot, comps = _verify_workspace(dv, bot_id, schema, ws, workflows, references, variables,
+                                   (before or {}).get("template") or HARNESS_TEMPLATE)
     published = publish(dv, bot_id) if do_publish else {"status": "skipped"}
-    bot, _ = dv("GET", f"bots({bot_id})?$select=template,configuration,publishedon,statuscode")
-    comps = list_components(dv, bot_id)
-    missing = sorted(set(expected) - set(comps))
-    if missing:
-        raise DeployError(f"components missing on the live record: {missing}")
-    unlinked = [row["schemaname"] for row in comps.values()
-                if "kind: WorkflowTool" in (row.get("data") or "") and not row.get("botcomponent_workflow")]
-    if unlinked:
-        raise DeployError(f"WorkflowTools with no flow on the live record: {unlinked}")
-    instructions = (json.loads(bot["configuration"])["agentSettings"]["instructions"]["segments"][0]["value"])
-    if bot.get("template") != HARNESS_TEMPLATE or instructions != settings["instructions"]:
-        raise DeployError("the live bot is not the harness agent this workspace describes")
+    if do_publish:
+        result["priorStatus"] = result["status"]
+        result["status"] = f"published {published.get('publishedon')}"
     env_id = environment_id(dv)
     result.update(botId=bot_id, bot=bot_op, components=len(comps), removed=removed, flows=flows,
                   connectionReferences=references, environmentVariables=variables, published=published,
                   makerUrl=(f"https://copilotstudio.microsoft.com/environments/{env_id}/agents/{bot_id}/preview"
                             if env_id else None))
-    log(f"deployed  {schema} ({bot_id}): {len(comps)} components, published {published.get('publishedon')}")
+    log(f"deployed  {schema} ({bot_id}): {len(comps)} components, "
+        + (f"published {published.get('publishedon')}" if do_publish else "not published"))
     return result

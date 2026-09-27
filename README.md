@@ -35,10 +35,16 @@ python3 -m brainfreeze_studio environments           # the environments that sig
 python3 -m brainfreeze_studio deploy build/workspace --environment https://<org>.crm.dynamics.com/ --draft
 ```
 
-`deploy` prints a `maker:` link that opens the agent's test chat. `--draft` leaves it unpublished; run it again
-without `--draft` to publish. copilot-harness-sdk's `scripts/deploy-harness-agent.mjs` deploys the same workspace.
+`deploy` prints a `maker:` link that opens the agent's test chat. `--draft` does not publish the agent's new
+settings; run again without `--draft` to publish. An already-published agent keeps its old settings, but updates
+to its existing flows take effect immediately. copilot-harness-sdk's `scripts/deploy-harness-agent.mjs` deploys
+the same workspace.
 Add `--plan` to preview creates, in-place updates and component removals with read-only requests; it changes
 nothing and never publishes, with or without `--draft`. `--plan --json` prints the plan as JSON.
+Plan and deploy print the workspace's `digest`; pass `--expect <digest>` to refuse a changed build before any
+write. The default removes components absent from the workspace; `--keep-extra` keeps them and names them in
+the plan. The plan also names each connection reference's source; an unrelated environment connection is used
+only with `--use-shared-connection`, and is reported as `shared connection (not yours)`.
 
 The build is offline and deterministic: the same egg always gives the same workspace. The egg is verified
 first, and its agents' contracts are read statically, so no code from the egg runs during a build.
@@ -53,7 +59,7 @@ first, and its agents' contracts are read statically, so no code from the egg ru
 
 | Option | Needed for |
 |---|---|
-| `--sdk-dir` | the SDK's proven profiles (HackerNews → connector + flow; ManageMemory / ContextMemory → Dataverse) |
+| `--sdk-dir` | the SDK's reviewed, source-digest-pinned profiles (HackerNews → connector + flow; ManageMemory / ContextMemory → Dataverse) |
 | `--environment` | the memory profiles (the Dataverse org URL) |
 | `--hn-api-name` | the HackerNews profile (the environment's RAPP Hacker News connector) |
 | `--session` | a session egg whose prompts become `proof.json` |
@@ -169,10 +175,13 @@ python3 -m brainfreeze_studio rapplication @rapp/json_doctor --translations tran
     --environment https://yourorg.crm.dynamics.com/ --deploy     # signs in with az; omit --deploy to stay offline
 ```
 
-`--draft` leaves the agent unpublished. `--no-app` leaves the code app and its Power Apps flows out of both the
+`--draft` does not publish the agent's new settings, and does not upload or publish its code app.
+`--no-app` leaves the code app and its Power Apps flows out of both the
 build and deploy, so no Node or npm is needed.
 Add `--plan` with `--deploy` to preview the agent, its app flows and the code app without changing the environment;
 `--plan --json` prints the plan as JSON.
+For an agent-only build, use the printed `deploy <out>/workspace` command and `--expect <digest>` after approval,
+instead of running `rapplication` again and rebuilding it.
 
 A RAPP Store rapplication (`manifest.json`, `singleton/<id>_agent.py`, `ui/index.html`, each file checked against
 the catalog's SHA-256), or a rapp/1 `rapplication` egg, builds like a one-agent brainstem, and its UI becomes a
@@ -256,6 +265,9 @@ the `ms` CLI are (MAPPING, managed apps row 9, has what the hosted path takes).
 token is the user's own delegated one, so the agent lands with that person's rights, in any environment they can
 make agents in. It needs no pac, az or Node, and no service account. Each step is a Dataverse Web API call, the
 same calls `pac copilot push` and `publish` make. It is idempotent and refuses app-only tokens.
+The token must carry the delegated `user_impersonation` scope before any request; Dataverse still verifies
+the token. Explicit connection maps take precedence, existing agent bindings are kept and reported, and a new
+binding uses the user's own connection unless shared-connection use was explicitly enabled.
 
 ```python
 from brainfreeze_studio.deploy import deploy

@@ -164,6 +164,16 @@ class ProfileTests(unittest.TestCase):
         settings = (r["workspace"] / "settings.mcs.yml").read_text()
         self.assertIn(ENV, settings)
         self.assertIn("You are Invoice Desk, a brisk accounts-payable assistant.", settings)
+        for agent in r["agents"]:
+            if agent["as"] in bs.PROFILES:
+                self.assertIn(f"SDK profile for the grail's {agent['name']}, sha256 ", agent["note"])
+                self.assertTrue(agent["note"].endswith("; not re-proven against this file"))
+
+    def test_crlf_copies_of_the_reviewed_profiles_still_match(self):
+        files = {f"agents/{f}": (GRAIL / f).read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                 for f in ("hacker_news_agent.py", "manage_memory_agent.py", "context_memory_agent.py")}
+        r, _ = build(egg(files, "grail-crlf.egg"), sdk_dir=SDK, environment=ENV, hn_api_name="shared_hn")
+        self.assertEqual(sorted(r["routing"]), ["hackernews", "memory-recall", "memory-write"])
 
     def test_profiles_need_their_inputs_or_fall_back_honestly(self):
         r, _ = build(self.egg, sdk_dir=SDK)                                  # no environment, no connector
@@ -187,6 +197,22 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(kinds.get("HackerNewsWorkflow"), "WorkflowTool")
         self.assertEqual(got["wf"], bs.workflow_id_for("rapp_InvoiceDesk", "RAPPHackerNewsWorkflow"))
         self.assertGreaterEqual(got["components"], 3)
+
+
+class ProfileDigestTests(unittest.TestCase):
+    def test_a_name_alone_never_selects_a_reviewed_profile(self):
+        import hashlib
+        for name in ("ManageMemory", "ContextMemory", "HackerNews"):
+            with self.subTest(name=name):
+                source = ROUTER.replace("InvoiceRouter", name).encode()
+                r, _ = build(egg({"agents/other_agent.py": source}), sdk_dir=SDK, environment=ENV,
+                             hn_api_name="shared_hn")
+                digest = hashlib.sha256(source).hexdigest()[:12]
+                self.assertEqual(r["agents"][0]["as"], "reasoning-only skill")
+                self.assertEqual(r["agents"][0]["note"],
+                                 f"named {name} but its code isn't the reviewed grail agent "
+                                 f"(sha256 {digest}); reasoning-only")
+                self.assertEqual(r["routing"], [])
 
 
 class VendorTests(unittest.TestCase):

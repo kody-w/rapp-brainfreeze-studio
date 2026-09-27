@@ -41,6 +41,10 @@ it reads, custom connector code (C#) for logic too heavy for flow expressions, a
 translation is **proven** against the agent's real Python before it's deployed, and a failed proof is refused. An
 outside MCP host is only the fallback, for agents bound to the machine they run on (agent.py row 7).
 
+The SDK profiles require the reviewed grail source digests (CRLF normalized to LF), not just matching names.
+The pinned files match the grail `49db80c8` Invoice Desk snapshot reviewed on 24 Sep 2026; a match reports its
+digest and says it was not re-proven against that file. Different code with a familiar name falls back with a reason.
+
 ## Brainstem runtime
 
 | # | Brainstem | Copilot Studio harness | Status | Notes |
@@ -59,7 +63,7 @@ outside MCP host is only the fallback, for agents bound to the machine they run 
 | 12 | Settings in `.env` (read by agents, `requires_env`) | Environment variables, read by the translated flow | **built** | A translated agent's setting becomes a flow parameter bound to an environment variable (for example `rapp_InvoiceApprovalLimit`), and the parity proof covers several values. `provenance.json` lists the variables to create with the SDK's `upsertEnvironmentVariable`. Live (24 Sep 2026), the flow ran with the default limit; a changed value hasn't been tested live. Deploys now create these variables themselves; on 25 Sep 2026 the RAPP Files Site and Folder variables a deploy created were what the JSON Doctor flow's SharePoint reads used (the flow's parameter defaults carry the same values, so a run doesn't tell the two apart). |
 | 13 | Voice mode (`\|\|\|VOICE\|\|\|` split) | — | **gap** | No harness equivalent is mapped. Teams and M365 channels handle speech themselves. |
 | 14 | Channels: the web UI, any `/chat` client | Teams and Microsoft 365 Copilot (`setChannels` + publish) | **proven** | Declared and published. The portal builds the Teams app package on first publish. |
-| 15 | Health and introspection (`/health`) | `assertHarnessAgent` + `listComponents` readback | **proven** | The SDK reads back template, instructions, published state and every component. |
+| 15 | Health and introspection (`/health`) | `assertHarnessAgent` + `listComponents` readback | **proven** | The SDK reads back template, instructions, published state and every component. brainfreeze-studio compares component content and descriptions, exact flow links, parsed flow definitions and activation, connection bindings and environment-variable presence before publishing. |
 | 16 | Runs anywhere Python runs; the user owns their instance | A tenant-owned agent in a Power Platform environment | **gap** | This is the tier change itself, not a bug. Needs pac + Entra + an environment. |
 
 ## agent.py
