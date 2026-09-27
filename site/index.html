@@ -158,7 +158,7 @@ a{color:var(--accent)}
       <li><b>Translation proofs:</b> matching specs are checked against the agent's Python or recorded proofs. The build reports results such as <code>InvoiceRouter 72/72 PROVEN</code>; a failed proof stops the build. This is not a new Python proof for a reviewed SDK profile.</li>
       <li id="proof-safety"><b>Trust the source:</b> proving a translation runs the agent's Python on your computer, in a separate process with a clean environment and a temporary home and working folder. This is not a sandbox: build only code you trust.</li>
       <li id="plan-rules"><b>Before deploying:</b> your AI shows a read-only plan (<code>--plan</code>): create or update, which components would be removed, whether the agent was already published, and which connection each flow uses. It deploys only after you say yes.</li>
-      <li id="deploy-rules"><b>While deploying:</b> a digest checks it is exactly the build that was planned. The deploy reads back the components, their content, the flows and their links and bindings, and stops on any difference.</li>
+      <li id="deploy-rules"><b>While deploying:</b> a digest checks it is exactly the build that was planned. Pass the plan's printed <code>digest:</code> value as <code>--expect &lt;digest&gt;</code>; do not rebuild in between. The deploy reads back the components, their content, the flows and their links and bindings, and stops on any difference.</li>
       <li id="identity-rules"><b>As you:</b> it uses your own delegated sign-in; app-only tokens are refused. It uses your own connections, never someone else's unless you explicitly allow it.</li>
       <li id="redeploy-rules"><b>Redeploying:</b> it removes components not in the build, including ones added by hand in Copilot Studio. The plan lists them first; <code>--keep-extra</code> keeps them.</li>
     </ul>
@@ -166,7 +166,7 @@ a{color:var(--accent)}
   </details>
   <details>
     <summary>For AI agents reading this page</summary>
-    <p id="ai-instructions">Before running anything, explain what you will install and wait for consent. The person signs in with the Azure CLI. Follow the setup skill's read-only <code>--plan</code> and digest-checked deploy; show removals, existing publication and flow connections before asking for approval. Deploy as a Draft (<code>--draft</code>), never publish as part of setup. If you can drive the person's signed-in browser, ask the test question and show the actual reply. Otherwise give them the maker link and question to ask; do not claim the reply was verified.</p>
+    <p id="ai-instructions">Before running anything, explain what you will install and wait for consent. The person signs in with the Azure CLI. For every source (Brainstem, RAPP Store or sample), build once. Run <code>python3 -m brainfreeze_studio deploy &lt;build&gt;/workspace --environment &lt;environment&gt; --draft --plan</code> for the read-only plan; show removals, existing publication and flow connections before asking for approval. After approval, run the same command with <code>--expect &lt;digest&gt;</code> instead of <code>--plan</code>, using the plan's printed <code>digest:</code> value. Do not rebuild in between. The deploy leaves a Draft; never publish as part of setup. If you can drive the person's signed-in browser, ask the test question and show the actual reply. Otherwise give them the maker link and question to ask; do not claim the reply was verified.</p>
     <h3>GitHub Copilot, Claude Code, and any AI agent that can run commands</h3>
     <p>Follow the <a href="skills/brainfreeze-studio/SKILL.md">setup skill</a>. Also read: the <a href="brainfreeze-studio.json">setup contract</a> (machine-readable), <a href="llms.txt">llms.txt</a>, and, in Claude Code, <a href="CLAUDE.md">CLAUDE.md</a>.</p>
   </details>
@@ -182,7 +182,7 @@ a{color:var(--accent)}
 </footer>
 
 <script type="application/json" id="brainfreeze-studio-discovery">
-{"schema":"brainfreeze-studio-setup/1","manifest":"https://kody-w.github.io/rapp-brainfreeze-studio/brainfreeze-studio.json","skill":"https://kody-w.github.io/rapp-brainfreeze-studio/skills/brainfreeze-studio/SKILL.md","product":"brainfreeze studio","golden_path":"github-copilot","compatibility":["claude-code","any AI agent that can run commands"]}
+{"schema":"brainfreeze-studio-setup/3","manifest":"https://kody-w.github.io/rapp-brainfreeze-studio/brainfreeze-studio.json","skill":"https://kody-w.github.io/rapp-brainfreeze-studio/skills/brainfreeze-studio/SKILL.md","product":"brainfreeze studio","golden_path":"github-copilot","compatibility":["claude-code","any AI agent that can run commands"]}
 </script>
 <script>
 (() => {

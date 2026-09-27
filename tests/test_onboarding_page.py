@@ -153,6 +153,26 @@ class Page(unittest.TestCase):
                 with self.subTest(section=ident, phrase=phrase):
                     self.assertIn(phrase, doc.text(ident))
 
+    def test_discovery_declares_the_v3_setup_schema(self):
+        discovery = json.loads(Markup(PAGE).text("brainfreeze-studio-discovery"))
+        self.assertEqual(discovery["schema"], "brainfreeze-studio-setup/3")
+
+    def test_every_source_builds_once_then_plans_and_deploys_the_same_workspace(self):
+        doc = Markup(PAGE)
+        instructions = doc.text("ai-instructions")
+        plan = ("python3 -m brainfreeze_studio deploy <build>/workspace "
+                "--environment <environment> --draft --plan")
+        self.assertIn("For every source (Brainstem, RAPP Store or sample), build once.", instructions)
+        self.assertIn(plan, instructions)
+        self.assertIn("After approval, run the same command with --expect <digest> instead of --plan", instructions)
+        self.assertIn("plan's printed digest: value", instructions)
+        self.assertIn("Do not rebuild in between.", instructions)
+        self.assertLess(instructions.index(plan), instructions.index("After approval"))
+        self.assertNotIn("rapplication --deploy", instructions)
+        deploy = doc.text("deploy-rules")
+        for phrase in ("printed digest:", "--expect <digest>", "do not rebuild in between"):
+            self.assertIn(phrase, deploy)
+
     def test_a_browser_reply_is_conditional_in_the_page_and_the_pasted_line(self):
         doc = Markup(PAGE)
         tail = re.search(r'const TAIL = "([^"]+)";', PAGE).group(1)
