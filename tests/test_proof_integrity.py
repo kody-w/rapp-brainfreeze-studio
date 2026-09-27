@@ -9,6 +9,7 @@ import site
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
@@ -116,6 +117,60 @@ class ProofFixture(unittest.TestCase):
         self.assertFalse(report["parity"], report)
         self.assertEqual((report["cases"], report["scheduled"]), (scheduled, scheduled))
         self.assertIn(reason, report["reason"])
+
+
+class AbruptExitTests(ProofFixture):
+    def exit_code(self, held_pipe):
+        if not held_pipe:
+            return "            os._exit(0)\n"
+        return ("            if os.fork() == 0:\n"
+                "                time.sleep(12)\n"
+                "                os._exit(0)\n"
+                "            os._exit(0)\n")
+
+    def echo_source(self, held_pipe):
+        return "import os, time\n" + AGENT.replace(
+            '        return "same"', '        if value == "second":\n' + self.exit_code(held_pipe) + '        return "same"')
+
+    def test_flow_os_exit_is_refused_in_under_ten_seconds(self):
+        original = (ROOT / "examples/invoice_router_agent.py").read_text()
+        spec = json.loads((ROOT / "translations/invoice_router.json").read_text())
+        for held_pipe in ((False, True) if hasattr(os, "fork") else (False,)):
+            with self.subTest(inherited_pipe=held_pipe):
+                source = "import time\n" + original.replace(
+                    "        limit = float(",
+                    '        if vendor == "Fabrikam":\n' + self.exit_code(held_pipe) + "        limit = float(")
+                self.agent.write_text(source)
+                started = time.monotonic()
+                report = flows.prove(spec, self.agent, "rapp_Test")
+                self.assertLess(time.monotonic() - started, 10, "dead runner was held open by inherited pipes")
+                self.assertRefused(report, "missing results", scheduled=72)
+                self.assertEqual(report["observed"], 1)
+
+    def test_materialized_os_exit_is_refused_in_under_ten_seconds(self):
+        for held_pipe in ((False, True) if hasattr(os, "fork") else (False,)):
+            with self.subTest(inherited_pipe=held_pipe):
+                self.agent.write_text(self.echo_source(held_pipe))
+                started = time.monotonic()
+                with self.assertRaisesRegex(mat.ProofProtocolError, r"scheduled=2, observed=1"):
+                    mat.Runner(self.agent, self.basic).run(FLOW_SPEC["vectors"])
+                self.assertLess(time.monotonic() - started, 10, "dead materialize runner waited for pipe EOF")
+                started = time.monotonic()
+                report = flows.prove_materialized(MATERIALIZED_SPEC, self.agent, self.basic)
+                self.assertLess(time.monotonic() - started, 10, "dead materialized proof waited for pipe EOF")
+                self.assertRefused(report, "missing results")
+                self.assertEqual(report["observed"], 1)
+
+    def test_connector_python_os_exit_is_refused_in_under_ten_seconds(self):
+        for held_pipe in ((False, True) if hasattr(os, "fork") else (False,)):
+            with self.subTest(inherited_pipe=held_pipe):
+                self.agent.write_text(self.echo_source(held_pipe))
+                started = time.monotonic()
+                with self.local_connector():
+                    report = self.connector()
+                self.assertLess(time.monotonic() - started, 10, "dead connector runner waited for pipe EOF")
+                self.assertRefused(report, "missing result for case_id 1")
+                self.assertEqual((report["observed_python"], report["observed_code"]), (1, 1))
 
 
 class BatchProofTests(ProofFixture):
@@ -236,11 +291,11 @@ class BatchProofTests(ProofFixture):
 
     def test_batch_timeouts_preserve_scheduled_and_observed_counts(self):
         stdout = b'{"case_id":0,"ok":true,"out":"same"}\n'
-        with mock.patch.object(flows.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 120, stdout)):
+        with mock.patch.object(flows, "run_proof_process", side_effect=subprocess.TimeoutExpired([], 120, stdout)):
             report = flows.prove(FLOW_SPEC, self.agent, "rapp_Test")
         self.assertRefused(report, "runner timed out")
         self.assertEqual(report["observed"], 1)
-        with mock.patch.object(mat.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 600, stdout)):
+        with mock.patch.object(mat, "run_proof_process", side_effect=subprocess.TimeoutExpired([], 600, stdout)):
             with self.assertRaisesRegex(mat.ProofProtocolError, r"scheduled=2, observed=1"):
                 mat.Runner(self.agent, self.basic).run(FLOW_SPEC["vectors"])
 

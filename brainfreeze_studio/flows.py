@@ -40,7 +40,7 @@ from pathlib import Path
 
 from . import StudioBuildError
 from .materialize import (PROOF_BOOTSTRAP, ProofProtocolError, _unique_fields, complete_proof,
-                          proof_environment, proof_lines, proof_results)
+                          proof_environment, proof_lines, proof_results, run_proof_process)
 
 # ── a small Workflow Definition Language evaluator ──────────────────────────
 
@@ -828,9 +828,9 @@ def prove(spec, agent_file, schema_name, compare_output="result", basic_file=Non
                     for i, (vec, env) in enumerate(cases))
     try:
         with tempfile.TemporaryDirectory(prefix="bfs-flow-proof-") as work:
-            proc = subprocess.run([sys.executable, "-B", "-c", _RUN_AGENT, str(Path(agent_file).resolve())],
-                                  input=lines.encode("utf-8"), capture_output=True, timeout=120,
-                                  env=proof_environment(work), cwd=work)
+            proc = run_proof_process([sys.executable, "-B", "-c", _RUN_AGENT, str(Path(agent_file).resolve())],
+                                     input=lines.encode("utf-8"), timeout=120,
+                                     env=proof_environment(work), cwd=work)
         python_out = proof_results(proc.stdout, scheduled, "flow", "Python runner")
         if proc.returncode != 0:
             raise ProofProtocolError("Python runner", f"runner exited with status {proc.returncode}",

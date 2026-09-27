@@ -45,12 +45,14 @@ import platform
 import random
 import re
 import shutil
+import signal
 import site
 import string
 import subprocess
 import sys
 import sysconfig
 import tempfile
+import threading
 import weakref
 from pathlib import Path
 
@@ -390,6 +392,38 @@ def proof_python(python=None):
     return str(Path(executable).expanduser().absolute()) if os.path.dirname(executable) else executable
 
 
+def _stop_proof_group(process):
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def proof_process(args, **kwargs):
+    """Watch the runner PID, not just pipe EOF: descendants must not hold a dead runner's pipes open."""
+    process = subprocess.Popen(args, start_new_session=os.name == "posix", **kwargs)
+    if os.name == "posix":
+        def exited():
+            process.wait()
+            _stop_proof_group(process)
+        threading.Thread(target=exited, daemon=True).start()
+    return process
+
+
+def run_proof_process(args, *, input, timeout, env, cwd):
+    with proof_process(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       env=env, cwd=cwd) as process:
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except BaseException:
+            process.kill()
+            _stop_proof_group(process)
+            process.communicate()
+            raise
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
 # The limits run after exec, not in preexec_fn: fork-time Python callbacks can deadlock a threaded Function host.
 # Darwin's RLIMIT_AS is not a reliable limit for framework Python's reserved address space; Linux gets 4 GiB.
 PROOF_BOOTSTRAP = r'''
@@ -669,8 +703,8 @@ class Runner:
         label = f"{Path(self.agent_file).name}: Python runner"
         with tempfile.TemporaryDirectory(prefix="bfs-materialize-") as work:
             try:
-                proc = subprocess.run(argv, input=payload.encode("utf-8"), capture_output=True, timeout=self.timeout,
-                                      env=proof_environment(work, self.env, hashseed), cwd=work)
+                proc = run_proof_process(argv, input=payload.encode("utf-8"), timeout=self.timeout,
+                                         env=proof_environment(work, self.env, hashseed), cwd=work)
             except subprocess.TimeoutExpired as e:
                 raise ProofProtocolError(label, "runner timed out", len(requests), len(proof_lines(e.stdout))) from None
             except OSError:

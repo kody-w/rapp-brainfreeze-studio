@@ -38,7 +38,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from .materialize import (PROOF_BOOTSTRAP, ProofProtocolError, ProofResults, _unique_fields, complete_proof,
-                          proof_environment, proof_lines, proof_python, proof_results)
+                          proof_environment, proof_lines, proof_process, proof_python, proof_results)
 
 HARNESS_ROOT = Path("~/.cache/brainfreeze-studio/connector-harness").expanduser()
 NEWTONSOFT = "13.0.3"
@@ -411,7 +411,7 @@ class _Session:
         self.results = ProofResults(scheduled, kind, label)
         self.sent, self.timeout, self.lines, self.writes = 0, timeout, queue.Queue(), queue.Queue()
         try:
-            self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+            self.p = proof_process(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
         except OSError:
             self.results.fail("runner could not start")
         self.readers = [threading.Thread(target=self._read_stdout, daemon=True),
