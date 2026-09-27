@@ -1,10 +1,13 @@
 """python3 -m brainfreeze_studio build <egg> --name "..." --publisher-prefix rapp [--sdk-dir ...] [--out build/]
+python3 -m brainfreeze_studio environments                      (the environments your az login can reach)
+python3 -m brainfreeze_studio deploy build/workspace --environment https://<org>.crm.dynamics.com/ [--draft]
 python3 -m brainfreeze_studio rapplication @kody-w/agent_team --out out/ [--environment https://<org>.crm.dynamics.com/ --deploy]
 python3 -m brainfreeze_studio codeapp-host
 python3 -m brainfreeze_studio managed-app spec.json --out out/ [--deploy --sdk-dir ../copilot-harness-sdk --tenant <id>]"""
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -12,7 +15,7 @@ import time
 from . import StudioBuildError, build
 
 
-def main(argv=None):
+def parser():
     p = argparse.ArgumentParser(prog="brainfreeze-studio",
                                 description="Turn a frozen RAPP brainstem (organism egg) into a Copilot Studio agent.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -34,6 +37,18 @@ def main(argv=None):
     b.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
     b.add_argument("--out", default="build", help="output folder (default build/)")
     b.add_argument("--json", action="store_true", help="print the summary as JSON")
+    dp = sub.add_parser("deploy", help="deploy a built workspace to Copilot Studio as you, with your Azure CLI sign-in "
+                        "(az login)")
+    dp.add_argument("workspace", help="the workspace a build wrote, for example build/workspace")
+    dp.add_argument("--environment", required=True, help="https://<org>.crm.dynamics.com/ (see: environments)")
+    dp.add_argument("--draft", action="store_true", help="leave the agent a Draft: don't publish it")
+    dp.add_argument("--files-site", help="the SharePoint site agents that read files find them in (default: the "
+                    "build's, else the environment's RAPP Files Site, else your tenant's root site)")
+    dp.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
+    dp.add_argument("--json", action="store_true", help="print the result as JSON")
+    en = sub.add_parser("environments", help="the Power Platform environments your Azure CLI sign-in (az login) can "
+                        "reach, from the Global Discovery Service")
+    en.add_argument("--json", action="store_true", help="print them as JSON")
     sv = sub.add_parser("serve", help="fallback: serve an egg's agents as MCP tools (runs the real agent.py)")
     sv.add_argument("egg")
     sv.add_argument("--engine-dir", help="a grail checkout to use instead of cloning the egg's pinned engine")
@@ -56,6 +71,7 @@ def main(argv=None):
     ra.add_argument("--deploy", action="store_true", help="deploy as you: the agent, its flows and the code app, "
                                                           "with your Azure CLI sign-in (az login)")
     ra.add_argument("--no-app", action="store_true", help="with --deploy: leave the code app out")
+    ra.add_argument("--draft", action="store_true", help="with --deploy: leave the agent a Draft: don't publish it")
     ra.add_argument("--files-site", help="the SharePoint site agents that read files find them in (default: the "
                     "environment's RAPP Files Site, else your tenant's root site)")
     ra.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
@@ -86,7 +102,15 @@ def main(argv=None):
     ma.add_argument("--dataverse-url", help="task-tracker: the environment URL for --create-table, if the spec has "
                     "no dataverseUrl")
     ma.add_argument("--json", action="store_true", help="print the result as JSON")
-    a = p.parse_args(argv)
+    return p
+
+
+def main(argv=None):
+    a = parser().parse_args(argv)
+    if a.cmd == "environments":
+        return _environments(a)
+    if a.cmd == "deploy":
+        return _deploy(a)
     if a.cmd == "managed-app":
         return _managed_app(a)
     if a.cmd == "codeapp-host":
@@ -132,7 +156,8 @@ def main(argv=None):
     prov = json.load(open(os.path.join(a.out, "provenance.json")))
     for agent, p in prov.get("parity", {}).items():
         print(f"parity:      {agent} {p['passed']}/{p['cases']} {'PROVEN' if p['parity'] else 'FAILED'}")
-    print(f"next:        deploy with copilot-harness-sdk: see {a.out}/provenance.json")
+    print(f"next:        python3 -m brainfreeze_studio deploy {os.path.join(a.out, 'workspace')} "
+          "--environment https://<org>.crm.dynamics.com/ --draft")
     return 0
 
 
@@ -143,10 +168,10 @@ def az_token(resource):
     if cached and cached[1] - time.time() > 300:
         return cached[0]
     try:
-        out = subprocess.run(["az", "account", "get-access-token", "--resource", resource, "-o", "json"],
-                             capture_output=True, text=True, check=True).stdout
+        out = subprocess.run([shutil.which("az") or "az", "account", "get-access-token", "--resource", resource,
+                              "-o", "json"], capture_output=True, text=True, check=True).stdout
     except FileNotFoundError:
-        raise SystemExit("brainfreeze-studio: --deploy signs in with the Azure CLI; install it and run az login")
+        raise SystemExit("brainfreeze-studio: this signs in with the Azure CLI; install it and run az login")
     except subprocess.CalledProcessError as e:
         raise SystemExit(f"brainfreeze-studio: az couldn't get a token for {resource}: {e.stderr.strip()[:400]}")
     body = json.loads(out)
@@ -161,6 +186,48 @@ APIHUB = "https://apihub.azure.com"
 def _files_home(a):
     home = {k: v for k, v in (("site", a.files_site), ("folder", a.files_folder)) if v}
     return home or None
+
+
+def _environments(a):
+    from .discovery import DISCOVERY, DiscoveryError, environments
+    try:
+        found = environments(az_token(DISCOVERY))
+    except DiscoveryError as e:
+        print(f"brainfreeze-studio: {e}", file=sys.stderr)
+        return 1
+    if a.json:
+        print(json.dumps(found, indent=2))
+        return 0
+    if not found:
+        print("brainfreeze-studio: this sign-in belongs to no enabled environment; az login with the account that "
+              "has your Copilot Studio environment", file=sys.stderr)
+        return 1
+    width = max(len(e["name"]) for e in found)
+    for e in found:
+        print(f"{e['name']:<{width}}  {e['kind'] or '-':<10}  {e['region'] or '-':<14}  {e['url']}")
+    return 0
+
+
+def _deploy(a):
+    from .codeapp_publish import AUDIENCE, PublishError
+    from .deploy import DeployError, deploy
+    env = a.environment.rstrip("/") + "/"
+    try:
+        r = deploy(a.workspace, env, lambda: az_token(env.rstrip("/")), do_publish=not a.draft,
+                   get_powerapps_token=lambda: az_token(AUDIENCE), get_apihub_token=lambda: az_token(APIHUB),
+                   files_site=a.files_site, files_folder=a.files_folder,
+                   log=(lambda m: None) if a.json else print)
+    except (DeployError, PublishError, OSError, ValueError, KeyError) as e:
+        print(f"brainfreeze-studio: {e}", file=sys.stderr)
+        return 1
+    if a.json:
+        print(json.dumps(r, indent=2, default=str))
+        return 0
+    print(f"agent:       {r.get('displayName')}  ({r.get('schemaName')})")
+    print("status:      " + ("Draft: not published (run again without --draft to publish)" if a.draft
+                             else f"published {r.get('published', {}).get('publishedon')}"))
+    print(f"maker:       {r.get('makerUrl')}")
+    return 0
 
 
 def _record_proof(a):
@@ -265,7 +332,7 @@ def _rapplication(a):
         try:
             deployed = rp.deploy(a.out, env, lambda: az_token(env.rstrip("/")), lambda: az_token(AUDIENCE),
                                  log=print, app=not a.no_app, get_apihub_token=lambda: az_token(APIHUB),
-                                 files_site=a.files_site, files_folder=a.files_folder)
+                                 files_site=a.files_site, files_folder=a.files_folder, publish_agent=not a.draft)
         except (DeployError, PublishError) as e:
             print(f"brainfreeze-studio: {e}", file=sys.stderr)
             return 1
@@ -278,16 +345,26 @@ def _rapplication(a):
     for t in s["tools"]:
         print(f"  {t['name']:<22} -> " + (f"flow for the app: {t['flow']['displayName']}" if t["flow"]
                                           else "the agent answers the app"))
+    try:
+        with open(os.path.join(a.out, "provenance.json"), encoding="utf-8") as f:
+            prov = json.load(f)
+    except (OSError, ValueError):
+        prov = {}
+    for agent, p in prov.get("parity", {}).items():
+        print(f"parity:       {agent} {p['passed']}/{p['cases']} {'PROVEN' if p['parity'] else 'FAILED'}")
     app = s.get("codeapp")
     if app:
         risks = app["report"].get("risks") or []
-        print(f"code app:     {app['displayName']}  ({a.out}/codeapp)" + (f"  {len(risks)} warning(s):" if risks else ""))
+        print(f"code app:     {app['displayName']}  ({a.out}/codeapp)" + (f"  {len(risks)} warning(s):" if risks else "")
+              + ("  (built here, not deployed: --no-app)" if a.deploy and a.no_app else ""))
         for r in risks:
             print(f"  ! {r}")
     else:
         print("code app:     none (the rapplication ships no UI)")
     if deployed:
         d = s["deployed"]
+        if a.draft:
+            print("status:       Draft: not published (run again without --draft to publish)")
         print(f"maker:        {d.get('makerUrl')}")
         if d.get("codeapp"):
             print(f"play:         {d['codeapp']['playUrl']}")
