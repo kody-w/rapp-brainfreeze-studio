@@ -69,6 +69,7 @@ dependencies and needs no install: `python3 -m brainfreeze_studio` runs it from 
   `New-Item -ItemType Directory -Force "$HOME\brainfreeze-work"; Set-Location "$HOME\brainfreeze-work"`.
 - Quote a RAPP Store id, as in `'@rapp/markdown_medic'`. An unquoted argument that starts with `@` is PowerShell
   syntax.
+- Windows PowerShell 5.1 has no `&&`: run the commands one at a time, or join them with `;`.
 
 ## 2. Sign in and pick the environment
 
@@ -89,8 +90,9 @@ Then list their environments and ask which one to use:
 python3 -m brainfreeze_studio environments
 ```
 
-It prints each environment's name, kind, region and URL. Use the chosen URL as `<environment>` below. If it lists
-nothing, they signed in with an account that isn't in any environment: sign in again with the right one.
+It prints each environment's name, kind, region and URL, usually within half a minute. Use the chosen URL as
+`<environment>` below. If it lists nothing, they signed in with an account that isn't in any environment: sign in
+again with the right one.
 
 ## 3. Build it (offline)
 
@@ -108,7 +110,8 @@ git -C .. clone https://github.com/kody-w/copilot-harness-sdk.git
 
 On Debian or Ubuntu, `python3 -m venv` needs the `python3-venv` package: install it with their yes.
 
-Freeze their Brainstem into an egg, then build it:
+Freeze their Brainstem into an egg, then build it. Installing the freezer and freezing each take about half a
+minute; the build takes seconds.
 
 ```bash
 ../.venv/bin/python -m brainfreeze egg ~/.brainstem/src/rapp_brainstem --owner <github-login> --slug <short-name> --no-memory --out ../eggs
@@ -218,7 +221,9 @@ wait for the reply, and show it to them. Otherwise, tell them the question to ty
   Output is exactly what the Python returns, `Fabrikam $18,750.00: queue APPROVAL, needs AP manager sign-off (limit $10,000).`
   The reply below it puts that result in the agent's own words.
 - **Their Brainstem:** ask a prompt from `../build/<short-name>/proof.json` when it has turns, and compare the reply
-  with `reference-answers.json`. Otherwise ask what it can help with.
+  with `reference-answers.json`. Otherwise ask `What can you help me with?` That's a smoke test, not a proof: the
+  reply should describe what its agents do, and a skill must never claim it ran code, fetched live data or remembered
+  anything, because it works from its instructions.
 - **A RAPP Store app:** ask what it can help with, or the kind of question its catalog entry describes.
 
 A connector-code tool created a moment ago can answer 404 for a few minutes. Wait, then ask again before calling
