@@ -1,6 +1,8 @@
 """The command line's sign-in commands, without a tenant: az, HTTP and the deploy itself are stand-ins."""
+import hashlib
 import io
 import json
+import shlex
 import sys
 import tempfile
 import time
@@ -448,6 +450,133 @@ class RapplicationPlan(unittest.TestCase):
                                              "--files-folder", "/Other Documents")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(json.loads(out)["flows"]["update"], ["Test Desk JsonDoctorFlow"])
+
+
+class BuildMessages(unittest.TestCase):
+    REASON = "no proven profile or translation spec for it"
+
+    def setUp(self):
+        from test_build import ROUTER, egg
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.out = self.root / "out"
+        self.source = ROUTER.replace("InvoiceRouter", "BABAComplianceCheck")
+        self.egg = egg({"agents/check_agent.py": self.source.encode()}, str(self.root / "desk.egg"))
+
+    def command(self, *extra):
+        with mock.patch.object(cli, "az_token", side_effect=AssertionError("a build must stay offline")):
+            return run(["build", str(self.egg), "--out", str(self.out), "--name", "Test Desk",
+                        "--publisher-prefix", "rapp", *extra])
+
+    def test_an_unmatched_skill_prints_and_records_its_reason(self):
+        code, out, err = self.command()
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"  BABAComplianceCheck -> reasoning-only skill  ({self.REASON})\n", out)
+        agents = json.loads((self.out / "provenance.json").read_text())["agents"]
+        self.assertEqual((agents[0]["as"], agents[0]["note"]), ("reasoning-only skill", self.REASON))
+        code, out, err = self.command("--json")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["agents"], agents)
+
+    def test_specific_skill_reasons_are_not_replaced(self):
+        from test_build import egg
+        specs = self.root / "translations"
+        specs.mkdir()
+        digest = hashlib.sha256(self.source.encode()).hexdigest()[:12]
+        cases = [
+            ("profile", self.source.replace("BABAComplianceCheck", "HackerNews"), None,
+             "no --sdk-dir: proven profiles unavailable, deployed as a reasoning-only skill"),
+            ("proof", self.source, {"agent": "BABAComplianceCheck", "flow_name": "CheckFlow"},
+             "translation not proven: stand-in proof refused"),
+            ("materialized", self.source, {"agent": "BABAComplianceCheck", "mode": "materialized", "source_sha256": "0" * 64},
+             f"materialized translation is for different code (sha256 000000000000, egg has {digest}); rematerialize it"),
+        ]
+        for kind, source, spec, reason in cases:
+            with self.subTest(kind=kind), mock.patch("brainfreeze_studio.flows.prove",
+                    return_value={"parity": False, "reason": "stand-in proof refused", "passed": 0, "cases": 1}):
+                egg({"agents/check_agent.py": source.encode()}, str(self.egg))
+                if spec:
+                    (specs / "check.json").write_text(json.dumps(spec))
+                code, out, err = self.command(*(["--translations", str(specs)] if spec else []))
+                self.assertEqual((code, err), (0, ""))
+                agent = json.loads((self.out / "provenance.json").read_text())["agents"][0]
+                self.assertEqual((agent["as"], agent["note"]), ("reasoning-only skill", reason))
+                self.assertIn(f"  ({reason})\n", out)
+
+    def test_next_keeps_the_environment_and_quotes_a_workspace_with_spaces(self):
+        self.out = self.root / "out with spaces"
+        environment = "https://chosen.crm4.dynamics.com/"
+        code, out, err = self.command("--environment", environment)
+        self.assertEqual((code, err), (0, ""))
+        workspace = str(self.out / "workspace")
+        self.assertEqual(out.splitlines()[-2:], [
+            f"next:        python3 -m brainfreeze_studio deploy '{workspace}' --environment {environment} --draft --plan",
+            "             then the same without --plan"])
+        self.assertEqual(shlex.split(out.splitlines()[-2].split("next:", 1)[1]),
+                         ["python3", "-m", "brainfreeze_studio", "deploy", workspace,
+                          "--environment", environment, "--draft", "--plan"])
+
+    def test_next_uses_the_placeholder_when_no_environment_was_given(self):
+        code, out, err = self.command()
+        self.assertEqual((code, err), (0, ""))
+        workspace = shlex.quote(str(self.out / "workspace"))
+        self.assertEqual(out.splitlines()[-2:], [
+            f"next:        python3 -m brainfreeze_studio deploy {workspace} "
+            "--environment https://<org>.crm.dynamics.com/ --draft --plan",
+            "             then the same without --plan"])
+
+
+class RapplicationMessages(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(__file__).resolve().parent.parent
+        self.out = Path(tmp.name) / "out"
+        self.host = Path(tmp.name) / "host.js"
+        self.host.write_text("/* stand-in host */")
+
+    def command(self, *extra):
+        with mock.patch("brainfreeze_studio.codeapp.host_bundle", return_value=self.host), \
+                mock.patch.object(cli, "az_token", side_effect=AssertionError("a build must stay offline")), \
+                mock.patch("urllib.request.urlopen", side_effect=AssertionError("no real HTTP")):
+            return run(["rapplication", str(self.root / "examples" / "rapplications" / "invoice_router"),
+                        "--out", str(self.out), *extra])
+
+    def test_the_flow_mapping_precedes_app_tools_and_keeps_parity(self):
+        code, out, err = self.command("--translations", str(self.root / "translations"))
+        self.assertEqual((code, err), (0, ""))
+        mapping = f"  {'InvoiceRouter':<18} -> agent flow (translated, parity proven)"
+        tool = f"  {'InvoiceRouter':<22} -> flow for the app: Invoice Router InvoiceRouterFlow (Power Apps)"
+        lines = out.splitlines()
+        self.assertIn(mapping, lines)
+        self.assertIn(tool, lines)
+        self.assertLess(lines.index(mapping), lines.index(tool))
+        self.assertIn("parity:       InvoiceRouter 72/72 PROVEN", lines)
+        agent = json.loads((self.out / "rapplication.json").read_text())["agent"]["agents"][0]
+        self.assertEqual(agent["as"], "agent flow (translated, parity proven)")
+        self.assertNotIn("note", agent)
+
+    def test_the_skill_mapping_precedes_app_tools_and_includes_its_reason(self):
+        code, out, err = self.command()
+        self.assertEqual((code, err), (0, ""))
+        mapping = f"  {'InvoiceRouter':<18} -> reasoning-only skill  ({BuildMessages.REASON})"
+        tool = f"  {'InvoiceRouter':<22} -> the agent answers the app"
+        lines = out.splitlines()
+        self.assertIn(mapping, lines)
+        self.assertIn(tool, lines)
+        self.assertLess(lines.index(mapping), lines.index(tool))
+        summary = json.loads((self.out / "rapplication.json").read_text())
+        provenance = json.loads((self.out / "provenance.json").read_text())
+        self.assertEqual(summary["agent"]["agents"], provenance["agents"])
+        self.assertEqual(provenance["agents"][0]["note"], BuildMessages.REASON)
+
+    def test_next_adds_a_plan_without_changing_the_rapplication_hint(self):
+        code, out, err = self.command("--environment", "https://chosen.crm4.dynamics.com/")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[-2:], [
+            "next:         --environment https://<org>.crm.dynamics.com/ --deploy --plan",
+            "              then the same without --plan"])
 
 
 class AzureCli(unittest.TestCase):

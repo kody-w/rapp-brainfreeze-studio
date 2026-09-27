@@ -604,6 +604,7 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
     for a in agents:
         if a["profile"]:
             continue
+        a["note"] = a["note"] or "no proven profile or translation spec for it"
         skill, yaml = _reasoning_skill(a["contract"], a["source"])
         (ws / "behaviors" / f"{publisher_prefix}_{skill}.mcs.yml").write_text(yaml)
         generic.append(skill)

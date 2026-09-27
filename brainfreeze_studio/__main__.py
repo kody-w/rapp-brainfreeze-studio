@@ -7,6 +7,7 @@ python3 -m brainfreeze_studio managed-app spec.json --out out/ [--deploy --sdk-d
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -153,15 +154,23 @@ def main(argv=None):
         return 0
     print(f"workspace:   {r['workspace']}")
     print(f"agent:       {r['schema_name']}")
-    for ag in r["agents"]:
-        print(f"  {ag['name']:<18} -> {ag['as']}" + (f"  ({ag['note']})" if ag.get("note") else ""))
+    _show_agents(r["agents"])
     print(f"proof turns: {r['proof_turns']}   memories: {r['memories']}")
-    prov = json.load(open(os.path.join(a.out, "provenance.json")))
+    with open(os.path.join(a.out, "provenance.json"), encoding="utf-8") as f:
+        prov = json.load(f)
     for agent, p in prov.get("parity", {}).items():
         print(f"parity:      {agent} {p['passed']}/{p['cases']} {'PROVEN' if p['parity'] else 'FAILED'}")
-    print(f"next:        python3 -m brainfreeze_studio deploy {os.path.join(a.out, 'workspace')} "
-          "--environment https://<org>.crm.dynamics.com/ --draft")
+    workspace = shlex.quote(str(r["workspace"]))
+    environment = shlex.quote(a.environment) if a.environment else "https://<org>.crm.dynamics.com/"
+    print(f"next:        python3 -m brainfreeze_studio deploy {workspace} "
+          f"--environment {environment} --draft --plan")
+    print("             then the same without --plan")
     return 0
+
+
+def _show_agents(agents):
+    for ag in agents:
+        print(f"  {ag['name']:<18} -> {ag['as']}" + (f"  ({ag['note']})" if ag.get("note") else ""))
 
 
 def az_token(resource):
@@ -401,6 +410,7 @@ def _rapplication(a):
         return 0
     print(f"rapplication: {s['rapp']['publisher']}/{s['rapp']['id']} v{s['rapp']['version']}  ({s['rappid']})")
     print(f"agent:        {s['agent']['schemaName']}  ({a.out}/workspace)")
+    _show_agents(s["agent"].get("agents", []))
     for t in s["tools"]:
         print(f"  {t['name']:<22} -> " + ("agent tool" if a.no_app else
               f"flow for the app: {t['flow']['displayName']}" if t["flow"] else "the agent answers the app"))
@@ -429,7 +439,8 @@ def _rapplication(a):
         if d.get("codeapp"):
             print(f"play:         {d['codeapp']['playUrl']}")
     else:
-        print(f"next:         --environment https://<org>.crm.dynamics.com/ --deploy")
+        print("next:         --environment https://<org>.crm.dynamics.com/ --deploy --plan")
+        print("              then the same without --plan")
     return 0
 
 
