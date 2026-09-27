@@ -13,6 +13,7 @@ import html.parser
 import importlib.util
 import io
 import json
+import os
 import re
 import shlex
 import struct
@@ -45,7 +46,8 @@ LLMS = (SITE_DIR / "llms.txt").read_text(encoding="utf-8")
 RUN = CONTRACT["run"] + " "
 FREEZE = "../.venv/bin/python -m brainfreeze "
 PLACEHOLDERS = {"<environment>": "https://org.crm.dynamics.com/", "<@publisher/id>": "@rapp/json_doctor",
-                "<github-login>": "you", "<short-name>": "desk", "<id>": "json_doctor", "<Agent name>": "Desk"}
+                "<github-login>": "you", "<short-name>": "desk", "<id>": "json_doctor", "<Agent name>": "Desk",
+                "<digest>": "0123456789ab"}
 
 
 def fill(command):
@@ -146,9 +148,20 @@ class Commands(unittest.TestCase):
         for source in ("brainstem", "rapp_store_app", "sample"):
             with self.subTest(source=source):
                 steps = CONTRACT["sources"][source]
-                self.assertEqual(steps["plan"], steps["deploy"] + " --plan")
+                self.assertEqual(steps["deploy"], steps["plan"].replace(" --plan", " --expect <digest>"))
                 self.assertIs(parse(steps["plan"]).plan, True)
                 self.assertIs(parse(steps["deploy"]).plan, False)
+                self.assertEqual(parse(steps["deploy"]).expect, PLACEHOLDERS["<digest>"])
+
+    def test_the_plan_and_the_deploy_use_the_build_it_made_and_never_rebuild(self):
+        for source in ("brainstem", "rapp_store_app", "sample"):
+            with self.subTest(source=source):
+                steps = CONTRACT["sources"][source]
+                built = parse(steps["build"]).out
+                for step in ("plan", "deploy"):
+                    args = parse(steps[step])
+                    self.assertEqual(args.cmd, "deploy", f"{step} must deploy the build, not build again")
+                    self.assertEqual(args.workspace, built + "/workspace")
 
     def test_the_skill_shows_each_plan_before_its_deploy(self):
         for source in ("brainstem", "rapp_store_app", "sample"):
@@ -156,11 +169,18 @@ class Commands(unittest.TestCase):
                 steps = CONTRACT["sources"][source]
                 self.assertLess(SKILL.index(steps["plan"]), SKILL.index(steps["deploy"] + "\n"))
 
+    def test_every_file_for_an_ai_deploys_exactly_the_planned_build_and_says_what_runs_where(self):
+        for name, text in (("skill", SKILL), ("CLAUDE.md", CLAUDE), ("llms.txt", LLMS),
+                           ("contract", json.dumps(CONTRACT))):
+            with self.subTest(file=name):
+                self.assertIn("--expect <digest>", text)
+                self.assertIn("sandbox", text, "it must say the proof's Python isn't sandboxed")
+                self.assertRegex(text, r"(haven't|has not) seen the reply", "it must never pass a link off as a reply")
+
     def test_nothing_it_builds_needs_node_unless_the_person_asks_for_the_code_app(self):
         for source in ("rapp_store_app", "sample"):
-            for step in ("build", "plan", "deploy"):
-                with self.subTest(source=source, step=step):
-                    self.assertIs(parse(CONTRACT["sources"][source][step]).no_app, True)
+            with self.subTest(source=source):
+                self.assertIs(parse(CONTRACT["sources"][source]["build"]).no_app, True)
 
     def test_the_freeze_command_is_one_brainfreeze_takes(self):
         if importlib.util.find_spec("brainfreeze") is None:
@@ -238,6 +258,46 @@ class Sample(unittest.TestCase):
         self.assertIn(example, {f"{a['publisher']}/{a['id']}" for a in apps})
 
 
+    def test_the_store_entries_it_says_to_skip_are_the_ones_the_command_line_refuses(self):
+        from brainfreeze_studio import rapplication
+        self.assertIn("`access` is `private`", SKILL)
+        self.assertIn("no `singleton_url`", SKILL)
+        entries = [{"id": "gated", "publisher": "@rapp", "access": "private", "singleton_url": "https://x/a.py"},
+                   {"id": "whole_app", "publisher": "@rapp", "application_schema": "dock"}]
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "index.json").write_text(json.dumps({"rapplications": entries}))
+            for ref in ("@rapp/gated", "@rapp/whole_app"):
+                with self.subTest(ref=ref):
+                    with self.assertRaises(rapplication.RapplicationError):
+                        rapplication.from_store(ref, store=d)
+
+
+def external_links():
+    """Every https link given to a person or an AI that isn't this site's own (those are checked as files)."""
+    texts = [PAGE, SKILL, CLAUDE, LLMS, json.dumps(CONTRACT)]
+    found = set()
+    for text in texts:
+        for url in re.findall(r"https://[^\s\"'<>()`\]]+", text):
+            url = url.rstrip(".,;:\\")
+            if "<" in url or url.startswith(SITE) or re.match(r"https://(fonts\.|org\.crm)", url):
+                continue
+            found.add(url)
+    return sorted(found)
+
+
+@unittest.skipUnless(os.environ.get("BFS_CHECK_LINKS") == "1", "set BFS_CHECK_LINKS=1 to fetch every external link")
+class LiveLinks(unittest.TestCase):
+    def test_every_external_link_answers(self):
+        import urllib.request
+        links = external_links()
+        self.assertGreaterEqual(len(links), 6)
+        for url in links:
+            with self.subTest(url=url):
+                req = urllib.request.Request(url, headers={"User-Agent": "brainfreeze-studio-site-check"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    self.assertEqual(r.status, 200, url)
+
+
 class Links(unittest.TestCase):
     def test_every_link_on_the_page_resolves(self):
         parser = _Links()
@@ -281,6 +341,7 @@ class Links(unittest.TestCase):
         discovery = json.loads(re.search(r'<script type="application/json" id="brainfreeze-studio-discovery">(.*?)'
                                          r"</script>", PAGE, re.S).group(1))
         self.assertEqual(discovery["manifest"], SITE + "brainfreeze-studio.json")
+        self.assertEqual(discovery["schema"], CONTRACT["schema"])
         self.assertEqual(discovery["skill"], CONTRACT["skill"])
         for url in (CONTRACT["skill"], SITE + "brainfreeze-studio.json", SITE):
             self.assertIn(url, LLMS)
