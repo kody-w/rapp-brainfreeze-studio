@@ -1,8 +1,10 @@
 # brainfreeze studio
 
 brainfreeze studio turns a RAPP agent (a person's Brainstem, a RAPP Store rapplication, or a frozen rapp/1 egg)
-into a Copilot Studio agent in their own environment. The agent's logic becomes agent flows or connector code, each
-proven against the agent's real Python. The deploy runs with the person's own sign-in.
+into a Copilot Studio agent in their own environment. An agent with a translation that brainfreeze studio ships
+becomes agent flows or connector code, proven against the agent's real Python; the Brainstem's own memory agents
+become Copilot Studio memory tools when their code is the reviewed original; every other agent becomes a skill, and
+the build says why. The deploy runs with the person's own sign-in.
 
 Primary user instruction:
 Put my agent in Copilot Studio.
@@ -21,8 +23,15 @@ https://github.com/kody-w/rapp-brainfreeze-studio
 
 Rules:
 - The person signs in themselves (az login) and picks the environment from their own list.
-- Say what you will install and create, in which environment, and wait for their yes.
+- Say what you will install, and wait for their yes.
+- The build runs the agents' Python on this computer to prove translations; it isn't a sandbox, so build only
+  code the person trusts.
+- Build once. Plan that build with --plan (read-only), show what it would create, update or remove, and wait for
+  yes. Then deploy exactly that build with the plan's --expect <digest>.
 - Deploy as a Draft (--draft). Publish only when the person asks.
 - Quote the build's parity lines; never claim a translation the build refused.
-- Never use a service account or an app-only token; never delete or change anything else in the environment.
+- Report a reply from Copilot Studio only if you saw it in the person's signed-in browser; otherwise give them
+  the link and the question, and say you haven't seen the reply.
+- Never use a service account, an app-only token or someone else's connection; never change anything in the
+  environment beyond what the plan lists.
 - Never print or store a token.

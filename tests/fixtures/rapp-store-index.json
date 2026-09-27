@@ -1,0 +1,120 @@
+{
+ "note": "publisher, id and name of each app in the RAPP Store index (rapplications), from https://raw.githubusercontent.com/kody-w/RAPP_Store/main/index.json; checked by test_onboarding_site",
+ "rapplications": [
+  {
+   "publisher": "@rapp",
+   "id": "bookfactory",
+   "name": "BookFactory"
+  },
+  {
+   "publisher": "@blazingbeard",
+   "id": "spine_dag",
+   "name": "SpineDAG"
+  },
+  {
+   "publisher": "@wildhaven",
+   "id": "wildhaven_ceo",
+   "name": "WildhavenCEO"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "vibe-coding-loop",
+   "name": "Vibe Coding Loop"
+  },
+  {
+   "publisher": "@wildhaven",
+   "id": "cockpit",
+   "name": "Cockpit"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "thoughtbox",
+   "name": "Thoughtbox"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "agent_team",
+   "name": "AgentTeam"
+  },
+  {
+   "publisher": "@bill",
+   "id": "coe_starter_kit",
+   "name": "CoE Starter Kit"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "rapp_god_forum",
+   "name": "rapp-god Forum"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "rapp_commons",
+   "name": "RAPP Commons"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "project_tracker",
+   "name": "Project Tracker"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "novell",
+   "name": "Novell"
+  },
+  {
+   "publisher": "@rapp",
+   "id": "pii_scout",
+   "name": "PII Scout"
+  },
+  {
+   "publisher": "@rapp",
+   "id": "json_doctor",
+   "name": "JSON Doctor"
+  },
+  {
+   "publisher": "@rapp",
+   "id": "markdown_medic",
+   "name": "Markdown Medic"
+  },
+  {
+   "publisher": "@rapp",
+   "id": "csv_surgeon",
+   "name": "CSV Surgeon"
+  },
+  {
+   "publisher": "@rapp",
+   "id": "log_detective",
+   "name": "Log Detective"
+  },
+  {
+   "publisher": "@rapp",
+   "id": "toaster",
+   "name": "Toaster"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "rapp_crispy",
+   "name": "RAPP Crispy"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "rapp_rewind",
+   "name": "RAPP Rewind"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "rapp_voice",
+   "name": "RAPP Voice"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "rapp_shot",
+   "name": "RAPP Shot"
+  },
+  {
+   "publisher": "@kody-w",
+   "id": "dock_scotty",
+   "name": "RAPP Dock / Scotty"
+  }
+ ]
+}
