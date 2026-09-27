@@ -190,15 +190,16 @@ def find_app(api, environment_id, config, owner=None):
     return (mine or same or [None])[0]
 
 
-def publish(codeapp_dir, environment_id, get_token, *, opener=None, log=print):
-    """Upload dist/, create or update the app, publish it. Returns {"appId", "playUrl", "operation", "packageUri"}."""
+def _read_app(codeapp_dir):
     codeapp_dir = Path(codeapp_dir)
     config = json.loads((codeapp_dir / "power.config.json").read_text())
     dist = codeapp_dir / "dist"
     if not (dist / "index.html").is_file():
         raise PublishError(f"{dist} has no index.html; build the code app first")
-    opener = opener or urllib.request.urlopen
-    api = _Api(get_token, opener)
+    return config, dist
+
+
+def _publish_user(get_token):
     claims = token_claims(get_token())
     aud = str(claims.get("aud", "")).rstrip("/")
     if aud not in (AUDIENCE.rstrip("/"), POWERAPPS_SERVICE_APP_ID):
@@ -206,6 +207,25 @@ def publish(codeapp_dir, environment_id, get_token, *, opener=None, log=print):
     oid = claims.get("oid")
     if not oid:
         raise PublishError("the token has no oid claim; sign in as a user")
+    return oid
+
+
+def plan(codeapp_dir, environment_id, get_token, *, opener=None):
+    """Find the publish target with GETs only: no storage, uploads, leases or publish."""
+    config, _ = _read_app(codeapp_dir)
+    oid = _publish_user(get_token)
+    existing = find_app(_Api(get_token, opener), environment_id, config, owner=oid)
+    return {"displayName": config["appDisplayName"], "operation": "update" if existing else "create",
+            "appId": existing["name"] if existing else None}
+
+
+def publish(codeapp_dir, environment_id, get_token, *, opener=None, log=print):
+    """Upload dist/, create or update the app, publish it. Returns {"appId", "playUrl", "operation", "packageUri"}."""
+    codeapp_dir = Path(codeapp_dir)
+    config, dist = _read_app(codeapp_dir)
+    opener = opener or urllib.request.urlopen
+    api = _Api(get_token, opener)
+    oid = _publish_user(get_token)
     environment = {"name": environment_id, "id": f"/providers/Microsoft.PowerApps/environments/{environment_id}"}
     existing = find_app(api, environment_id, config, owner=oid)
     sas = (api.call("POST", f"/objectIds/{oid}/generateResourceStorage?api-version={STORAGE_VERSION}",

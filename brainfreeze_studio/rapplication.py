@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import time
 import urllib.request
 import zipfile
@@ -299,10 +300,11 @@ def app_tools(r, agents, twin_flows):
 
 def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=None, store=STORE, translations=None,
             sdk_dir=None, environment=None, rappid=None, created_utc=None, fetch_vendor=None, host_js=None,
-            files_home=None, run_proofs=True):
+            files_home=None, run_proofs=True, app=True):
     """Everything offline, nothing deployed: the rapplication egg, the Copilot Studio workspace built from it, Power
     Apps twins of the flows the build proved, and the code app. Writes out_dir/rapplication.json and returns it.
-    A rappid minted by an earlier run in the same out_dir is kept, so re-running updates the same organism."""
+    A rappid minted by an earlier run in the same out_dir is kept, so re-running updates the same organism.
+    With app=False, leave out the code app and its Power Apps flows; no Node or npm is needed."""
     from . import build
     from . import codeapp
     r = load(where, store)
@@ -321,10 +323,10 @@ def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=N
     built = build(str(egg_path), out, display, publisher_prefix, schema_name=schema_name, sdk_dir=sdk_dir,
                   environment=environment, translations=translations, files_home=files_home, run_proofs=run_proofs)
     schema = built["schema_name"]
-    twin_flows = twins(built["workspace"], schema, display)
+    twin_flows = twins(built["workspace"], schema, display) if app else []
     tools = app_tools(r, built["agents"], twin_flows)
     chat = None
-    if r.ui and codeapp.ui_calls_agent(r.ui) and any(not t["flow"] for t in tools):
+    if app and r.ui and codeapp.ui_calls_agent(r.ui) and any(not t["flow"] for t in tools):
         # tools without a flow of their own, and free-form chat, go to the agent through a broker flow
         from . import workflow_id_for
         chat = {"id": workflow_id_for(schema, "ChatBrokerPowerApps"), "name": f"{display} Chat (Power Apps)",
@@ -337,16 +339,19 @@ def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=N
     if flows_dir.exists():
         for f in flows_dir.glob("*.json"):
             f.unlink()
-    flows_dir.mkdir(exist_ok=True)
+    if app:
+        flows_dir.mkdir(exist_ok=True)
     for t in twin_flows:
         (flows_dir / f"{t['of']['flow']}PowerApps.json").write_text(json.dumps(t, indent=2) + "\n")
-    app = None
-    if r.ui:
+    packaged = None
+    if not app and (out / "codeapp").is_dir():
+        shutil.rmtree(out / "codeapp")
+    if app and r.ui:
         kw = {"fetch_vendor": fetch_vendor} if fetch_vendor is not None else {}
         example = next((a["ui_example"] for a in built["agents"] if a.get("ui_example")), None)
-        app = codeapp.package(r, out, schema_name=schema, display_name=display, tools=tools, host_js=host_js,
-                              chat={"workflowId": chat["id"], "displayName": chat["name"]} if chat else None,
-                              example=example, **kw)
+        packaged = codeapp.package(r, out, schema_name=schema, display_name=display, tools=tools, host_js=host_js,
+                                   chat={"workflowId": chat["id"], "displayName": chat["name"]} if chat else None,
+                                   example=example, **kw)
     summary = {
         "kind": "brainfreeze-studio-rapplication", "rappid": manifest["rappid"], "egg": egg_path.name,
         "egg_address": rapp1.egg_address(manifest),
@@ -356,10 +361,48 @@ def prepare(where, out_dir, *, name=None, publisher_prefix="rapp", schema_name=N
         "tools": tools,
         "powerapps_flows": [{"id": t["id"], "name": t["name"], "of": t["of"]} for t in twin_flows],
         "chat": {"id": chat["id"], "name": chat["name"]} if chat else None,
-        "codeapp": ({"dir": "codeapp", "displayName": display, "report": app["report"]} if app else None),
+        "codeapp": ({"dir": "codeapp", "displayName": display, "report": packaged["report"]} if packaged else None),
     }
+    if not app:
+        summary["codeapp_skipped"] = "--no-app"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     return summary
+
+
+def _powerapps_flows(out, app):
+    return [json.loads(f.read_text()) for f in sorted((out / "powerapps-flows").glob("*.json"))] if app else []
+
+
+def plan(out_dir, environment, get_dataverse_token, get_powerapps_token=None, *, dataverse=None, opener=None,
+         app=True, files_site=None, files_folder=None):
+    """Preview the agent, its app flows and the code app with GETs only. The prepared files are left untouched."""
+    from . import codeapp_publish, deploy as dep
+    out = Path(out_dir).expanduser()
+    summary = json.loads((out / "rapplication.json").read_text())
+    dv = dataverse or dep.Dataverse(environment, get_dataverse_token)
+    flows = _powerapps_flows(out, app)
+    result = dep._plan_workspace(dv, dep.read_workspace(out / "workspace"), extra_flows=flows,
+                                 files_site=files_site, files_folder=files_folder)
+    names = {wf["name"] for wf in flows}
+    result["powerappsFlows"] = {key: [n for n in values if n in names] for key, values in result["flows"].items()}
+    result["codeapp"] = None
+    if not app or summary.get("codeapp_skipped"):
+        result["codeapp_skipped"] = "--no-app"
+    if result["agent"]["operation"] == "refuse":
+        return result
+    if summary.get("codeapp") and app:
+        if not get_powerapps_token:
+            result["codeapp"] = {"displayName": summary["codeapp"]["displayName"], "operation": "unchecked",
+                                 "reason": "the read-only app lookup needs a Power Apps token"}
+        else:
+            try:
+                env_id = dep.environment_id(dv)
+                if not env_id:
+                    raise dep.DeployError("couldn't read the environment id from Dataverse")
+                result["codeapp"] = codeapp_publish.plan(out / "codeapp", env_id, get_powerapps_token, opener=opener)
+            except (dep.DeployError, codeapp_publish.PublishError) as e:
+                result["agent"].update(operation="refuse", reason=str(e))
+    return result
 
 
 def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, *, log=print, publish_agent=True,
@@ -378,19 +421,16 @@ def deploy(out_dir, environment, get_dataverse_token, get_powerapps_token=None, 
                        get_apihub_token=get_apihub_token, files_site=files_site, files_folder=files_folder)
     from .connector_code import fill_connectors
     code_ids = {c["displayName"]: c["internalId"] for c in agent.get("connectors") or []}
-    log("flows for the code app")
+    if app:
+        log("flows for the code app")
     flows = []
-    for f in sorted((out / "powerapps-flows").glob("*.json")):
-        t = json.loads(f.read_text())
+    for t in _powerapps_flows(out, app):
         t["definition"] = fill_connectors(t["definition"], code_ids)
         if agent.get("files_home"):
             dep.apply_files_home(t["definition"], agent["files_home"])
-        for api, ref in ((t["definition"].get("properties") or {}).get("connectionReferences") or {}).items():
-            logical = ((ref or {}).get("connection") or {}).get("connectionReferenceLogicalName")
-            if logical:
-                connector = f"/providers/Microsoft.PowerApps/apis/{((ref.get('api') or {}).get('name')) or api}"
-                r = dep.ensure_connection_reference(dv, logical, connector, f"{summary['agent']['displayName']} - {api}")
-                log(f"   {logical}: {r['operation']}")
+        for api, logical, connector in dep.workflow_references(t["definition"]):
+            r = dep.ensure_connection_reference(dv, logical, connector, f"{summary['agent']['displayName']} - {api}")
+            log(f"   {logical}: {r['operation']}")
         flows.append(dep.ensure_workflow(dv, t))
         log(f"   {t['name']}: {flows[-1]['operation']}")
     result = {"agent": agent, "powerapps_flows": flows, "codeapp": None}

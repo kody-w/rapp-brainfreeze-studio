@@ -1,11 +1,13 @@
 """Deploy tests. Offline: an in-memory Dataverse that answers the queries brainfreeze_studio.deploy makes."""
 import json
 import re
+import shutil
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from copy import deepcopy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brainfreeze_studio import deploy as dp  # noqa: E402
@@ -105,6 +107,22 @@ class FakeDataverse:
             row["_parentbotid_value"] = re.search(r"\(([^)]+)\)", row.pop("parentbotid@odata.bind")).group(1)
         self.t[table][id_] = row
         return ({key: id_} if prefer else {}), {"odata-entityid": f"{self.base}{table}({id_})"}
+
+
+class ReadOnlyDataverse(FakeDataverse):
+    """Use the same tables and GETs, but fail before any attempted write can reach the backing fake."""
+
+    def __init__(self, source=None):
+        self.source = source or FakeDataverse()
+        self.environment, self.base = self.source.environment, self.source.base
+        self.t, self.writes = self.source.t, self.source.writes
+        self.reads = []
+
+    def __call__(self, method, path, *args, **kw):
+        if method != "GET":
+            raise AssertionError(f"a plan tried to {method} {path}")
+        self.reads.append(path)
+        return self.source(method, path, *args, **kw)
 
 
 def make_workspace(root, instructions="You are the test desk.\nAnswer briefly."):
@@ -426,6 +444,158 @@ class FilesDeployTests(unittest.TestCase):
         self.assertEqual(dp.ensure_environment_variable(self.dv, dict(var, defaultValue="b", replace=True))["operation"],
                          "updated")
         self.assertEqual(self.variables()["rapp_X"], "b")
+
+
+class PlanTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.ws = make_workspace(self.root)
+        self.dv = FakeDataverse()
+
+    def run_deploy(self, **kw):
+        return dp.deploy(self.ws, ENV, lambda: "token", dataverse=self.dv, do_publish=False, log=lambda *_: None, **kw)
+
+    def run_plan(self, **kw):
+        readonly = ReadOnlyDataverse(self.dv)
+        before = deepcopy(self.dv.t)
+        writes = list(self.dv.writes)
+        result = dp.plan(self.ws, ENV, lambda: "token", dataverse=readonly, **kw)
+        self.assertEqual(self.dv.t, before)
+        self.assertEqual(self.dv.writes, writes)
+        return result
+
+    def test_create_is_get_only_and_matches_the_deploy(self):
+        r = self.run_plan()
+        self.assertEqual(r["agent"], {"schemaName": "rapp_TestDesk", "displayName": "Test Desk", "operation": "create"})
+        self.assertEqual(r["components"], {"add": ["rapp_TestDesk.tool.InvoiceRouterFlow",
+                          "rapp_TestDesk.tool.rapp_dataverse-add-memory", "rapp_TestDesk.skill.rapp_desk-help"],
+                          "update": [], "remove": [], "keep": []})
+        self.assertEqual(r["flows"], {"create": ["Test Desk InvoiceRouterFlow"], "update": []})
+        self.assertEqual(r["environmentVariables"], {"create": ["rapp_InvoiceApprovalLimit"], "keep": []})
+        self.assertEqual(r["connectionReferences"], {"create": ["rapp_TestDesk.cr.shared_commondataserviceforapps"],
+                                                    "keep": []})
+        self.assertEqual(self.run_deploy()["bot"], "created")
+
+    def test_update_and_removals_agree_with_the_deploy(self):
+        made = self.run_deploy()
+        (self.ws / "behaviors" / "rapp_desk-help.mcs.yml").unlink()
+        settings = self.ws / "settings.mcs.yml"
+        settings.write_text(settings.read_text().replace("Answer briefly.", "Answer carefully."))
+        self.dv.t["botcomponents"]["other"] = {"botcomponentid": "other", "_parentbotid_value": made["botId"],
+                                              "schemaname": "handmade.topic.Legacy", "name": "Legacy", "data": ""}
+        before = {id_: row["schemaname"] for id_, row in self.dv.t["botcomponents"].items()}
+        r = self.run_plan()
+        self.assertEqual(r["agent"]["operation"], "update")
+        self.assertEqual(r["components"]["remove"], ["rapp_TestDesk.skill.rapp_desk-help", "handmade.topic.Legacy"])
+        self.dv.writes.clear()
+        deployed = self.run_deploy()
+        deleted = [before[m.group(1)] for method, path in self.dv.writes
+                   if method == "DELETE" and (m := re.fullmatch(r"botcomponents\(([^)]+)\)", path))]
+        self.assertEqual(r["components"]["remove"], deleted)
+        self.assertEqual(r["components"]["remove"], deployed["removed"])
+        self.assertEqual(deployed["bot"], "updated")
+
+    def test_unchanged_rows_are_kept_and_the_deploy_agrees(self):
+        self.run_deploy()
+        self.dv.writes.clear()
+        r = self.run_plan()
+        self.assertEqual(r["agent"]["operation"], "unchanged")
+        self.assertEqual([len(r["components"][k]) for k in ("add", "update", "remove", "keep")], [0, 0, 0, 3])
+        self.assertEqual(r["flows"], {"create": [], "update": []})
+        self.assertEqual(r["environmentVariables"], {"create": [], "keep": ["rapp_InvoiceApprovalLimit"]})
+        self.assertEqual(r["connectionReferences"], {"create": [], "keep": ["rapp_TestDesk.cr.shared_commondataserviceforapps"]})
+        self.assertEqual(self.run_deploy()["bot"], "unchanged")
+        self.assertEqual(self.dv.writes, [])
+
+    def test_keep_extra_components_turns_removals_into_keeps(self):
+        self.run_deploy()
+        (self.ws / "behaviors" / "rapp_desk-help.mcs.yml").unlink()
+        r = self.run_plan(keep_extra_components=True)
+        self.assertEqual(r["components"]["remove"], [])
+        self.assertIn("rapp_TestDesk.skill.rapp_desk-help", r["components"]["keep"])
+        self.dv.writes.clear()
+        self.assertEqual(self.run_deploy(keep_extra_components=True)["removed"], [])
+        self.assertFalse([w for w in self.dv.writes if w[0] == "DELETE"])
+
+    def test_a_classic_agent_refuses_with_gets_only(self):
+        self.dv.t["bots"]["old"] = {"botid": "old", "schemaname": "rapp_TestDesk", "template": "default-2.1.0"}
+        r = self.run_plan()
+        reason = "rapp_TestDesk exists but is a classic agent (default-2.1.0); refusing to change it"
+        self.assertEqual(r["agent"]["operation"], "refuse")
+        self.assertEqual(r["agent"]["reason"], reason)
+        self.assertFalse(any(r["components"].values()))
+        self.assertFalse(any(r["flows"].values()))
+        self.assertEqual(self.dv.writes, [])
+        with self.assertRaises(dp.DeployError) as refused:
+            self.run_deploy()
+        self.assertEqual(str(refused.exception), reason)
+
+    def test_name_overrides_and_guards_are_the_deploys_own(self):
+        r = self.run_plan(schema_name="other_Desk", display_name="Other Desk")
+        self.assertEqual(r["agent"], {"schemaName": "other_Desk", "displayName": "Other Desk", "operation": "create"})
+        self.assertTrue(all(n.startswith("other_Desk.") for n in r["components"]["add"]))
+        self.assertEqual(self.run_deploy(schema_name="other_Desk", display_name="Other Desk")["bot"], "created")
+        for kw in ({"schema_name": "nounderscore"}, {"display_name": "x" * 43}):
+            with self.subTest(kw=kw):
+                r = self.run_plan(**kw)
+                self.assertEqual(r["agent"]["operation"], "refuse")
+                with self.assertRaises(dp.DeployError) as refused:
+                    self.run_deploy(**kw)
+                self.assertEqual(r["agent"]["reason"], str(refused.exception))
+
+    def test_component_updates_include_content_and_links(self):
+        self.run_deploy()
+        for c in self.dv.t["botcomponents"].values():
+            if c["schemaname"].endswith("InvoiceRouterFlow"):
+                c["botcomponent_workflow"] = [{"workflowid": "aaaaaaaa-0000-0000-0000-000000000000"}]
+            elif c["schemaname"].endswith("rapp_dataverse-add-memory"):
+                c["botcomponent_connectionreference"] = []
+            else:
+                c["description"] = "Old description"
+        r = self.run_plan()
+        self.assertEqual(len(r["components"]["update"]), 3)
+        self.assertEqual(r["components"]["keep"], [])
+        self.run_deploy()
+        self.assertEqual(self.run_plan()["components"]["update"], [])
+
+    def test_flow_updates_use_the_same_state_and_content_comparison(self):
+        self.run_deploy()
+        saved = deepcopy(self.dv.t)
+        for change in ({"statecode": 0}, {"name": "Old"}, {"description": "Old"},
+                       {"clientdata": "not JSON"}, {"clientdata": '{"properties": {}}'}):
+            with self.subTest(change=change):
+                self.dv.t = deepcopy(saved)
+                self.dv.t["workflows"][WF_ID].update(change)
+                self.assertEqual(self.run_plan()["flows"], {"create": [], "update": ["Test Desk InvoiceRouterFlow"]})
+                self.assertEqual(self.run_deploy()["flows"][0]["operation"], "updated")
+
+    def test_reformatted_flow_json_and_reference_metadata_are_unchanged(self):
+        wf = self.ws / "workflows" / f"InvoiceRouterFlow-{WF_ID}" / "workflow.json"
+        definition = json.loads(wf.read_text())
+        definition["properties"]["connectionReferences"] = {"shared_x": {"api": {"name": "shared_x"}}}
+        wf.write_text(json.dumps(definition))
+        self.run_deploy()
+        definition["properties"]["connectionReferences"]["shared_x"]["api"]["logicalName"] = "added-on-save"
+        self.dv.t["workflows"][WF_ID]["clientdata"] = json.dumps(definition, indent=2, sort_keys=True)
+        self.assertEqual(self.run_plan()["flows"], {"create": [], "update": []})
+        self.assertEqual(self.run_deploy()["flows"][0]["operation"], "unchanged")
+
+    def test_a_missing_tool_flow_refuses_like_the_deploy(self):
+        shutil.rmtree(self.ws / "workflows")
+        r = self.run_plan()
+        self.assertEqual(r["agent"]["operation"], "refuse")
+        with self.assertRaises(dp.DeployError) as refused:
+            self.run_deploy()
+        self.assertEqual(r["agent"]["reason"], str(refused.exception))
+
+    def test_existing_files_defaults_are_used_before_comparing_flows(self):
+        self.ws, _ = files_workspace(self.root / "files")
+        self.run_deploy(files_site="https://contoso.sharepoint.com",
+                        connections={"rapp_TestDesk.shared_sharepointonline": "sp-1"})
+        self.assertEqual(self.run_plan()["flows"], {"create": [], "update": []})
+        self.assertTrue(all(f["operation"] == "unchanged" for f in self.run_deploy()["flows"]))
 
 
 if __name__ == "__main__":

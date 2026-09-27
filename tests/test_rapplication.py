@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -251,6 +252,196 @@ class PrepareTests(unittest.TestCase):
                                      host_js=self.host, created_utc=UTC)
         self.assertEqual(again["rappid"], self.summary["rappid"])
         self.assertEqual(again["egg_address"], self.summary["egg_address"])
+
+
+class NoAppTests(unittest.TestCase):
+    def test_host_install_output_uses_the_logger_so_json_can_stay_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = []
+
+            def run(cmd, **kw):
+                self.assertTrue(kw["capture_output"])
+                if cmd[0] == "npm":
+                    (Path(tmp) / "node_modules").mkdir()
+                    return subprocess.CompletedProcess(cmd, 0, stdout="installed the host\n", stderr="npm note\n")
+                return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+            with mock.patch("subprocess.run", side_effect=run):
+                codeapp.build_host(tmp, log=logs.append)
+            self.assertEqual(logs[1:], ["installed the host", "npm note"])
+
+    def test_no_app_needs_neither_the_host_nor_power_apps_flows(self):
+        for translations in (str(TRANSLATIONS), None):
+            with self.subTest(translations=translations), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(codeapp, "host_bundle", side_effect=AssertionError("no Node")), \
+                    mock.patch.object(codeapp, "build_host", side_effect=AssertionError("no npm")), \
+                    mock.patch.object(codeapp, "package", side_effect=AssertionError("no code app")), \
+                    mock.patch.object(rapplication, "twins", side_effect=AssertionError("no twins")), \
+                    mock.patch.object(codeapp, "chat_broker", side_effect=AssertionError("no chat broker")):
+                out = Path(tmp) / "out"
+                s = rapplication.prepare(EXAMPLE, out, translations=translations, app=False)
+                self.assertIsNone(s["codeapp"])
+                self.assertEqual(s["codeapp_skipped"], "--no-app")
+                self.assertEqual(s["powerapps_flows"], [])
+                self.assertIsNone(s["chat"])
+                self.assertFalse((out / "codeapp").exists())
+                self.assertFalse((out / "powerapps-flows").exists())
+                self.assertTrue((out / "workspace" / "settings.mcs.yml").is_file())
+                self.assertEqual(json.loads((out / "rapplication.json").read_text()), s)
+                if translations:
+                    prov = json.loads((out / "provenance.json").read_text())
+                    self.assertEqual(prov["parity"]["InvoiceRouter"], {"passed": 72, "cases": 72, "parity": True})
+
+    def test_app_true_still_packages_the_app_and_its_flows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            host = Path(tmp) / "host.js"
+            host.write_bytes(FAKE_HOST)
+            s = rapplication.prepare(EXAMPLE, tmp, translations=str(TRANSLATIONS), host_js=host, app=True)
+            self.assertIsNotNone(s["codeapp"])
+            self.assertNotIn("codeapp_skipped", s)
+            self.assertEqual(len(s["powerapps_flows"]), 1)
+            self.assertEqual((Path(tmp) / "codeapp" / "dist" / "host.js").read_bytes(), FAKE_HOST)
+
+    def test_no_app_clears_old_app_outputs_when_the_folder_is_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            host = Path(tmp) / "host.js"
+            host.write_bytes(FAKE_HOST)
+            before = rapplication.prepare(EXAMPLE, tmp, host_js=host)
+            self.assertIsNotNone(before["chat"])
+            after = rapplication.prepare(EXAMPLE, tmp, translations=str(TRANSLATIONS), app=False)
+            self.assertEqual(after["rappid"], before["rappid"])
+            self.assertFalse((Path(tmp) / "codeapp").exists())
+            self.assertEqual(list((Path(tmp) / "powerapps-flows").glob("*.json")), [])
+
+    def test_deploy_no_app_ignores_even_previously_built_twins_and_chat_flows(self):
+        from brainfreeze_studio import deploy as dp
+        from test_deploy import ENV, FakeDataverse
+
+        for translations in (str(TRANSLATIONS), None):
+            with self.subTest(translations=translations), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch("brainfreeze_studio.codeapp_publish.publish", side_effect=AssertionError("no app")):
+                host = Path(tmp) / "host.js"
+                host.write_bytes(FAKE_HOST)
+                rapplication.prepare(EXAMPLE, tmp, translations=translations, host_js=host)
+                dv = FakeDataverse()
+                result = rapplication.deploy(tmp, ENV, lambda: "token", dataverse=dv, app=False,
+                                              publish_agent=False, log=lambda *_: None,
+                                              get_powerapps_token=lambda: self.fail("no Power Apps token needed"))
+                self.assertIsNone(result["codeapp"])
+                self.assertEqual(result["powerapps_flows"], [])
+                expected = {wf["id"] for wf in dp.read_workspace(Path(tmp) / "workspace")["workflows"]}
+                self.assertEqual(set(dv.t["workflows"]), expected)
+                self.assertEqual(set(dv.t["connectionreferences"]), {"ref-env"})
+
+
+class PlanTests(unittest.TestCase):
+    def setUp(self):
+        from test_codeapp import ENV_ID, FakePowerApps
+        from test_deploy import FakeDataverse
+
+        class Dataverse(FakeDataverse):
+            def __call__(self, method, path, *a, **kw):
+                if path.startswith("RetrieveCurrentOrganization"):
+                    return {"Detail": {"EnvironmentId": ENV_ID}}, {}
+                return super().__call__(method, path, *a, **kw)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.host = self.root / "host.js"
+        self.host.write_bytes(FAKE_HOST)
+        self.out = self.root / "out"
+        self.summary = rapplication.prepare(EXAMPLE, self.out, translations=str(TRANSLATIONS), host_js=self.host)
+        self.dv, self.pa = Dataverse(), FakePowerApps()
+
+    def run_plan(self, **kw):
+        from copy import deepcopy
+        from test_codeapp import TOKEN
+        from test_deploy import ENV, ReadOnlyDataverse
+
+        def readonly(req, **args):
+            self.assertEqual(req.get_method(), "GET", f"a plan tried to write: {req.full_url}")
+            return self.pa(req, **args)
+
+        before = deepcopy((self.dv.t, self.dv.writes, self.pa.apps, self.pa.blobs, self.pa.leases))
+        files = {p: p.read_bytes() for p in self.out.rglob("*") if p.is_file()}
+        r = rapplication.plan(self.out, ENV, lambda: "token", lambda: TOKEN,
+                              dataverse=ReadOnlyDataverse(self.dv), opener=readonly, **kw)
+        self.assertEqual((self.dv.t, self.dv.writes, self.pa.apps, self.pa.blobs, self.pa.leases), before)
+        self.assertEqual({p: p.read_bytes() for p in self.out.rglob("*") if p.is_file()}, files)
+        return r
+
+    def run_deploy(self, **kw):
+        from test_codeapp import TOKEN
+        from test_deploy import ENV
+        return rapplication.deploy(self.out, ENV, lambda: "token", lambda: TOKEN, dataverse=self.dv, opener=self.pa,
+                                    publish_agent=False, log=lambda *_: None, **kw)
+
+    def test_create_plan_includes_the_twin_and_the_code_app_without_writing(self):
+        r = self.run_plan()
+        twin = self.summary["powerapps_flows"][0]["name"]
+        self.assertEqual(r["agent"]["operation"], "create")
+        self.assertEqual(r["powerappsFlows"], {"create": [twin], "update": []})
+        self.assertEqual(r["flows"], {"create": ["Invoice Router InvoiceRouterFlow", twin], "update": []})
+        self.assertEqual(r["codeapp"], {"displayName": "Invoice Router", "operation": "create", "appId": None})
+        deployed = self.run_deploy()
+        self.assertEqual(deployed["agent"]["bot"], "created")
+        self.assertEqual(deployed["powerapps_flows"][0]["operation"], "created")
+        self.assertEqual(deployed["codeapp"]["operation"], "created")
+
+    def test_update_plan_reuses_the_app_id_and_includes_changed_twins(self):
+        before = self.run_deploy()
+        twin = self.summary["powerapps_flows"][0]
+        self.dv.t["workflows"][twin["id"]]["statecode"] = 0
+        r = self.run_plan()
+        self.assertEqual(r["agent"]["operation"], "unchanged")
+        self.assertEqual(r["flows"], {"create": [], "update": [twin["name"]]})
+        self.assertEqual(r["powerappsFlows"], r["flows"])
+        self.assertEqual(r["codeapp"]["operation"], "update")
+        self.assertEqual(r["codeapp"]["appId"], before["codeapp"]["appId"])
+        deployed = self.run_deploy()
+        self.assertEqual(deployed["powerapps_flows"][0]["operation"], "updated")
+        self.assertEqual(deployed["codeapp"]["operation"], "updated")
+
+    def test_a_rebuild_finds_the_same_code_app_by_name_with_gets_only(self):
+        before = self.run_deploy()
+        rapplication.prepare(EXAMPLE, self.out, translations=str(TRANSLATIONS), host_js=self.host)
+        r = self.run_plan()
+        self.assertEqual(r["codeapp"]["operation"], "update")
+        self.assertEqual(r["codeapp"]["appId"], before["codeapp"]["appId"])
+        self.assertEqual(r["flows"], {"create": [], "update": []})
+
+    def test_no_app_does_not_even_look_up_the_app_or_its_flows(self):
+        r = self.run_plan(app=False)
+        self.assertEqual(r["powerappsFlows"], {"create": [], "update": []})
+        self.assertEqual(r["flows"], {"create": ["Invoice Router InvoiceRouterFlow"], "update": []})
+        self.assertIsNone(r["codeapp"])
+        self.assertEqual(r["codeapp_skipped"], "--no-app")
+        self.assertEqual(self.pa.log, [])
+
+    def test_chat_flow_and_its_reference_are_in_the_plan(self):
+        self.summary = rapplication.prepare(EXAMPLE, self.out, host_js=self.host)
+        chat = self.summary["chat"]
+        r = self.run_plan()
+        self.assertEqual(r["flows"], {"create": [chat["name"]], "update": []})
+        self.assertEqual(r["powerappsFlows"], r["flows"])
+        self.assertIn("rapp_InvoiceRouter.shared_microsoftcopilotstudio", r["connectionReferences"]["create"])
+        no_app = self.run_plan(app=False)
+        self.assertEqual(no_app["flows"], {"create": [], "update": []})
+        self.assertEqual(no_app["connectionReferences"], {"create": [], "keep": []})
+
+    def test_refusal_never_looks_up_the_code_app(self):
+        self.dv.t["bots"]["old"] = {"botid": "old", "schemaname": "rapp_InvoiceRouter", "template": "default-2.1.0"}
+        r = self.run_plan()
+        self.assertEqual(r["agent"]["operation"], "refuse")
+        self.assertIsNone(r["codeapp"])
+        self.assertEqual(self.pa.log, [])
+
+    def test_without_an_app_token_the_plan_says_it_could_not_check(self):
+        from test_deploy import ENV, ReadOnlyDataverse
+        r = rapplication.plan(self.out, ENV, lambda: "token", dataverse=ReadOnlyDataverse(self.dv))
+        self.assertEqual(r["codeapp"]["operation"], "unchecked")
+        self.assertIn("read-only app lookup needs a Power Apps token", r["codeapp"]["reason"])
 
 
 class DeployTests(unittest.TestCase):

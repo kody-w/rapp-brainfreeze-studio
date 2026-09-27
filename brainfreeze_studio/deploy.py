@@ -159,6 +159,14 @@ def read_settings(text):
     return out
 
 
+def workflow_references(definition):
+    for api, ref in ((definition.get("properties") or {}).get("connectionReferences") or {}).items():
+        logical = ((ref or {}).get("connection") or {}).get("connectionReferenceLogicalName")
+        if logical:
+            connector = f"/providers/Microsoft.PowerApps/apis/{((ref.get('api') or {}).get('name')) or api}"
+            yield api, logical, connector
+
+
 def read_workspace(workspace):
     """What a deploy needs from a harness workspace, as brainfreeze-studio and the SDK lay it out."""
     ws = Path(workspace)
@@ -195,10 +203,8 @@ def read_workspace(workspace):
         definition = json.loads((d / "workflow.json").read_text(encoding="utf-8").lstrip("\ufeff"))
         meta = (d / "metadata.yml").read_text(encoding="utf-8") if (d / "metadata.yml").is_file() else ""
         wid = _value(meta, "workflowId") or (GUID.findall(d.name) or [None])[-1]
-        for api, v in ((definition.get("properties") or {}).get("connectionReferences") or {}).items():
-            logical = ((v or {}).get("connection") or {}).get("connectionReferenceLogicalName")
-            if logical:
-                refs[logical] = refs.get(logical) or f"/providers/Microsoft.PowerApps/apis/{(v.get('api') or {}).get('name') or api}"
+        for _, logical, connector in workflow_references(definition):
+            refs[logical] = refs.get(logical) or connector
         workflows.append({"folder": d.name, "id": wid, "name": _value(meta, "name") or d.name,
                           "description": _value(meta, "description") or "", "definition": definition})
     env_vars = []
@@ -235,17 +241,32 @@ def bot_configuration(settings, instructions=None):
             "authoringModel": "CliCopilot"}
 
 
+def _agent_names(settings, schema_name=None, display_name=None):
+    schema = schema_name or settings["schemaName"]
+    name = display_name or settings["displayName"] or schema
+    if not schema or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+", schema):
+        raise DeployError(f"schema name {schema!r} must look like <prefix>_<Name>")
+    if len(name) > 42:
+        raise DeployError(f"display name is {len(name)} characters; longer than 42 never finishes provisioning")
+    return schema, name
+
+
 # ── the steps ────────────────────────────────────────────────────────────────
+
+def _connection_reference(dv, logical):
+    rows = dv.value(f"connectionreferences?$filter=connectionreferencelogicalname eq '{_q(logical)}'"
+                    "&$select=connectionreferenceid,connectionid,connectorid")
+    return rows[0] if rows else None
+
 
 def ensure_connection_reference(dv, logical, connector_id, display_name, connections=None, find_connection=None):
     """An agent-scoped reference bound to a connection this user can use: an explicit map entry, else the reference
     itself if already bound, else one of the user's own (find_connection, when given), else any bound reference for
     the same connector in the environment."""
-    existing = dv.value(f"connectionreferences?$filter=connectionreferencelogicalname eq '{_q(logical)}'"
-                        "&$select=connectionreferenceid,connectionid,connectorid")
+    existing = _connection_reference(dv, logical)
     connection = (connections or {}).get(logical) or (connections or {}).get(connector_id or "")
-    if not connection and existing and existing[0].get("connectionid"):
-        return {"logicalName": logical, "operation": "existing", "connectionId": existing[0]["connectionid"]}
+    if not connection and existing and existing.get("connectionid"):
+        return {"logicalName": logical, "operation": "existing", "connectionId": existing["connectionid"]}
     if not connection and find_connection and connector_id:
         connection = find_connection(connector_id)
     if not connection and connector_id:
@@ -258,21 +279,26 @@ def ensure_connection_reference(dv, logical, connector_id, display_name, connect
     body = {"connectionreferencedisplayname": display_name, "connectionreferencelogicalname": logical,
             "connectorid": connector_id, "connectionid": connection}
     if existing:
-        dv("PATCH", f"connectionreferences({existing[0]['connectionreferenceid']})", body)
+        dv("PATCH", f"connectionreferences({existing['connectionreferenceid']})", body)
         return {"logicalName": logical, "operation": "updated", "connectionId": connection}
     dv("POST", "connectionreferences", body)
     return {"logicalName": logical, "operation": "created", "connectionId": connection}
 
 
+def _environment_variable(dv, schema_name):
+    rows = dv.value(f"environmentvariabledefinitions?$filter=schemaname eq '{_q(schema_name)}'"
+                    "&$select=environmentvariabledefinitionid,defaultvalue")
+    return rows[0] if rows else None
+
+
 def ensure_environment_variable(dv, var):
     """Create the variable with the workspace's default; an existing one is left alone, except that a missing
     default is filled in (or replaced when var["replace"] says so)."""
-    rows = dv.value(f"environmentvariabledefinitions?$filter=schemaname eq '{_q(var['schemaName'])}'"
-                    "&$select=environmentvariabledefinitionid,defaultvalue")
-    if rows:
+    existing = _environment_variable(dv, var["schemaName"])
+    if existing:
         value = str(var.get("defaultValue", ""))
-        if value and (not rows[0].get("defaultvalue") or var.get("replace")) and rows[0].get("defaultvalue") != value:
-            dv("PATCH", f"environmentvariabledefinitions({rows[0]['environmentvariabledefinitionid']})",
+        if value and (not existing.get("defaultvalue") or var.get("replace")) and existing.get("defaultvalue") != value:
+            dv("PATCH", f"environmentvariabledefinitions({existing['environmentvariabledefinitionid']})",
                {"defaultvalue": value})
             return {"schemaName": var["schemaName"], "operation": "updated"}
         return {"schemaName": var["schemaName"], "operation": "existing"}
@@ -293,6 +319,12 @@ def _stored_definition(clientdata):
     return stored
 
 
+def _connector(dv, name):
+    rows = dv.value(f"connectors?$filter=name eq '{_q(name)}'&$select=connectorid,connectorinternalid,displayname,"
+                    "openapidefinition,customcodeblobcontent,scriptoperations")
+    return rows[0] if rows else None
+
+
 def ensure_connector(dv, c):
     """A custom connector with its code, as the Dataverse `connectors` row pac writes: created, updated when its
     definition or code changed, else left alone. Returns (its internal id, the operation)."""
@@ -303,10 +335,8 @@ def ensure_connector(dv, c):
             "policytemplateinstances": json.dumps(props.get("policyTemplateInstances") or []),
             "scriptoperations": json.dumps(props.get("scriptOperations") or []),
             "customcodeblobcontent": c["script"], "iconbrandcolor": props.get("iconBrandColor") or "#5a4fcf"}
-    rows = dv.value(f"connectors?$filter=name eq '{_q(c['name'])}'&$select=connectorid,connectorinternalid,displayname,"
-                    "openapidefinition,customcodeblobcontent,scriptoperations")
-    if rows:
-        cur = rows[0]
+    cur = _connector(dv, c["name"])
+    if cur:
         try:
             same = (json.loads(cur.get("openapidefinition") or "null") == c["openapi"]
                     and cur.get("customcodeblobcontent") == c["script"]
@@ -483,19 +513,26 @@ def apply_files_home(definition, home):
     return definition
 
 
+def _workflow_state(dv, wf):
+    rows = dv.value(f"workflows?$filter=workflowid eq {wf['id']}&$select=workflowid,name,description,statecode,clientdata")
+    cur = rows[0] if rows else None
+    if not cur:
+        return None, False
+    try:            # compare definitions, not strings: Dataverse stores the JSON reformatted
+        same = _stored_definition(cur.get("clientdata")) == wf["definition"]
+    except ValueError:
+        same = False
+    return cur, (cur.get("statecode") == 1 and same and cur.get("name") == wf["name"]
+                 and (cur.get("description") or "") == wf["description"])
+
+
 def ensure_workflow(dv, wf):
     """Create or update an agent flow and activate it; an activated, unchanged flow is left alone."""
+    cur, same = _workflow_state(dv, wf)
     clientdata = json.dumps(wf["definition"], separators=(",", ":"), ensure_ascii=False)
-    rows = dv.value(f"workflows?$filter=workflowid eq {wf['id']}&$select=workflowid,name,description,statecode,clientdata")
     body = {"name": wf["name"], "description": wf["description"], "clientdata": clientdata}
-    if rows:
-        cur = rows[0]
-        try:            # compare definitions, not strings: Dataverse stores the JSON reformatted
-            same = _stored_definition(cur.get("clientdata")) == wf["definition"]
-        except ValueError:
-            same = False
-        if cur.get("statecode") == 1 and same and cur.get("name") == wf["name"] \
-                and (cur.get("description") or "") == wf["description"]:
+    if cur:
+        if same:
             return {"name": wf["name"], "operation": "unchanged"}
         if cur.get("statecode") == 1:
             dv("PATCH", f"workflows({wf['id']})", {"statecode": 0, "statuscode": 1})
@@ -509,7 +546,7 @@ def ensure_workflow(dv, wf):
     return {"name": wf["name"], "operation": operation}
 
 
-def ensure_bot(dv, schema_name, display_name, settings, language=1033):
+def _bot_state(dv, schema_name, display_name, settings):
     config = json.dumps(bot_configuration(settings))
     rows = dv.value(f"bots?$filter=schemaname eq '{_q(schema_name)}'&$select=botid,template,configuration,name")
     fields = {"name": display_name, "configuration": config,
@@ -521,6 +558,15 @@ def ensure_bot(dv, schema_name, display_name, settings, language=1033):
         if bot.get("template") and not bot["template"].startswith("cliagent-"):
             raise DeployError(f"{schema_name} exists but is a classic agent ({bot['template']}); refusing to change it")
         if bot.get("configuration") != config or bot.get("name") != display_name:
+            return bot, fields, "update"
+        return bot, fields, "unchanged"
+    return None, fields, "create"
+
+
+def ensure_bot(dv, schema_name, display_name, settings, language=1033):
+    bot, fields, operation = _bot_state(dv, schema_name, display_name, settings)
+    if bot:
+        if operation == "update":
             dv("PATCH", f"bots({bot['botid']})", fields, headers={"If-Match": "*"})
             return bot["botid"], "updated"
         return bot["botid"], "unchanged"
@@ -539,11 +585,19 @@ def list_components(dv, bot_id):
     return {r["schemaname"].lower(): r for r in rows}
 
 
+def _component_fields(c):
+    return {"name": c["displayName"], "description": c["description"], "data": c["data"]}
+
+
+def _component_changed(c, cur):
+    return any((cur.get(k) or "") != (v or "") for k, v in _component_fields(c).items())
+
+
 def ensure_component(dv, bot_id, schema_name, c, live):
-    want = {"name": c["displayName"], "description": c["description"], "data": c["data"]}
+    want = _component_fields(c)
     cur = live.get(schema_name.lower())
     if cur:
-        if any((cur.get(k) or "") != (v or "") for k, v in want.items()):
+        if _component_changed(c, cur):
             dv("PATCH", f"botcomponents({cur['botcomponentid']})", want)
             return cur["botcomponentid"], "updated"
         return cur["botcomponentid"], "unchanged"
@@ -556,28 +610,43 @@ def ensure_component(dv, bot_id, schema_name, c, live):
     return comp_id, "created"
 
 
-def link_component(dv, comp_id, c, live_row, workflow_ids, reference_ids):
-    ops = []
+def _component_links(c, live_row):
+    extra_flows, flow, reference = [], None, None
     if c["kind"] == "WorkflowTool" and c["workflowId"]:
         have = {w["workflowid"].lower() for w in (live_row or {}).get("botcomponent_workflow", [])}
-        for wid in have - {c["workflowId"].lower()}:
-            dv("DELETE", f"botcomponents({comp_id})/botcomponent_workflow({wid})/$ref")
-            ops.append(f"unlinked flow {wid}")
+        extra_flows = sorted(have - {c["workflowId"].lower()})
         if c["workflowId"].lower() not in have:
-            if c["workflowId"].lower() not in workflow_ids:
-                raise DeployError(f"{c['file']} points at flow {c['workflowId']}, which the workspace doesn't carry")
-            dv("POST", f"botcomponents({comp_id})/botcomponent_workflow/$ref", dv.ref("workflows", c["workflowId"]))
-            ops.append("linked flow")
+            flow = c["workflowId"]
     if c["kind"] == "ConnectorTool" and c["connectionReference"]:
         have = {r["connectionreferencelogicalname"] for r in (live_row or {}).get("botcomponent_connectionreference", [])}
         if c["connectionReference"] not in have:
-            ref_id = reference_ids.get(c["connectionReference"])
-            if not ref_id:
-                raise DeployError(f"connection reference {c['connectionReference']} is missing")
-            dv("POST", f"botcomponents({comp_id})/botcomponent_connectionreference/$ref",
-               dv.ref("connectionreferences", ref_id))
-            ops.append("linked reference")
+            reference = c["connectionReference"]
+    return extra_flows, flow, reference
+
+
+def link_component(dv, comp_id, c, live_row, workflow_ids, reference_ids):
+    ops = []
+    extra_flows, flow, reference = _component_links(c, live_row)
+    for wid in extra_flows:
+        dv("DELETE", f"botcomponents({comp_id})/botcomponent_workflow({wid})/$ref")
+        ops.append(f"unlinked flow {wid}")
+    if flow:
+        if flow.lower() not in workflow_ids:
+            raise DeployError(f"{c['file']} points at flow {flow}, which the workspace doesn't carry")
+        dv("POST", f"botcomponents({comp_id})/botcomponent_workflow/$ref", dv.ref("workflows", flow))
+        ops.append("linked flow")
+    if reference:
+        ref_id = reference_ids.get(reference)
+        if not ref_id:
+            raise DeployError(f"connection reference {reference} is missing")
+        dv("POST", f"botcomponents({comp_id})/botcomponent_connectionreference/$ref",
+           dv.ref("connectionreferences", ref_id))
+        ops.append("linked reference")
     return ops
+
+
+def _extra_components(live, expected):
+    return [row for key, row in live.items() if key not in expected]
 
 
 def publish(dv, bot_id, timeout=600):
@@ -640,6 +709,78 @@ def environment_id(dv):
         return None
 
 
+def _plan_workspace(dv, ws, *, schema_name=None, display_name=None, keep_extra_components=False, extra_flows=(),
+                    files_site=None, files_folder=None):
+    settings = ws["settings"]
+    schema = schema_name or settings["schemaName"]
+    name = display_name or settings["displayName"] or schema
+    result = {"agent": {"schemaName": schema, "displayName": name, "operation": "refuse"},
+              "components": {"add": [], "update": [], "remove": [], "keep": []},
+              "flows": {"create": [], "update": []},
+              "environmentVariables": {"create": [], "keep": []},
+              "connectionReferences": {"create": [], "keep": []}}
+    try:
+        schema, name = _agent_names(settings, schema_name, display_name)
+        bot, _, operation = _bot_state(dv, schema, name, settings)
+        live = list_components(dv, bot["botid"]) if bot else {}
+        expected = {component_schema_name(schema, c).lower() for c in ws["components"]}
+        workflow_ids = {wf["id"].lower() for wf in ws["workflows"]}
+        for c in ws["components"]:
+            key = component_schema_name(schema, c)
+            cur = live.get(key.lower())
+            unlinked_flows, flow, reference = _component_links(c, cur)
+            if flow and flow.lower() not in workflow_ids:
+                raise DeployError(f"{c['file']} points at flow {flow}, which the workspace doesn't carry")
+            action = "add" if not cur else "update" if (
+                _component_changed(c, cur) or unlinked_flows or flow or reference) else "keep"
+            result["components"][action].append(key)
+        extras = _extra_components(live, expected)
+        result["components"]["keep" if keep_extra_components else "remove"].extend(r["schemaname"] for r in extras)
+
+        references = dict(ws["connection_references"])
+        for wf in extra_flows:
+            for _, logical, connector in workflow_references(wf["definition"]):
+                references[logical] = references.get(logical) or connector
+        for logical in sorted(references):
+            action = "keep" if _connection_reference(dv, logical) else "create"
+            result["connectionReferences"][action].append(logical)
+        home = {"site": files_site, "folder": files_folder, "schemas": {}}
+        for v in ws["environment_variables"]:
+            existing = _environment_variable(dv, v["schemaName"])
+            result["environmentVariables"]["keep" if existing else "create"].append(v["schemaName"])
+            if v.get("files"):
+                home["schemas"][v["schemaName"]] = v["files"]
+                home[v["files"]] = (home.get(v["files"]) or (existing or {}).get("defaultvalue")
+                                    or v.get("defaultValue") or "")
+        ids = {}
+        for c in ws["connectors"]:
+            existing = _connector(dv, c["name"])
+            if existing:
+                ids[c["displayName"]] = existing["connectorinternalid"]
+        from .connector_code import fill_connectors
+        for wf in [*ws["workflows"], *extra_flows]:
+            wf["definition"] = fill_connectors(wf["definition"], ids)
+            if home["schemas"]:
+                apply_files_home(wf["definition"], home)
+            cur, same = _workflow_state(dv, wf)
+            if not same:
+                result["flows"]["update" if cur else "create"].append(wf["name"])
+        result["agent"]["operation"] = operation
+    except DeployError as e:
+        result["agent"]["reason"] = str(e)
+    return result
+
+
+def plan(workspace, environment, get_token, *, schema_name=None, display_name=None, dataverse=None,
+         keep_extra_components=False):
+    """A GET-only snapshot of the deploy's agent, component and flow changes. Names and comparisons are shared
+    with deploy(). Existing setting rows are kept; deploy may fill their missing defaults or connection bindings."""
+    ws = read_workspace(workspace)
+    dv = dataverse or Dataverse(environment, get_token)
+    return _plan_workspace(dv, ws, schema_name=schema_name, display_name=display_name,
+                           keep_extra_components=keep_extra_components)
+
+
 def deploy(workspace, environment, get_token, *, schema_name=None, display_name=None, connections=None,
            keep_extra_components=False, do_publish=True, log=print, dataverse=None, get_powerapps_token=None,
            powerapps_opener=None, get_apihub_token=None, files_site=None, files_folder=None):
@@ -650,12 +791,7 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
     them in files_site/files_folder (default: the build's, else the environment's, else the tenant's root site)."""
     ws = read_workspace(workspace)
     settings = ws["settings"]
-    schema = schema_name or settings["schemaName"]
-    name = display_name or settings["displayName"] or schema
-    if not schema or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+", schema):
-        raise DeployError(f"schema name {schema!r} must look like <prefix>_<Name>")
-    if len(name) > 42:
-        raise DeployError(f"display name is {len(name)} characters; longer than 42 never finishes provisioning")
+    schema, name = _agent_names(settings, schema_name, display_name)
     dv = dataverse or Dataverse(environment, get_token)
     result = {"schemaName": schema, "displayName": name, "environment": dv.environment}
 
@@ -748,10 +884,9 @@ def deploy(workspace, environment, get_token, *, schema_name=None, display_name=
     log("6/7 stale components")
     removed = []
     if not keep_extra_components:
-        for key, row in list_components(dv, bot_id).items():
-            if key not in expected:
-                dv("DELETE", f"botcomponents({row['botcomponentid']})")
-                removed.append(row["schemaname"])
+        for row in _extra_components(list_components(dv, bot_id), expected):
+            dv("DELETE", f"botcomponents({row['botcomponentid']})")
+            removed.append(row["schemaname"])
     log(f"   {'removed ' + ', '.join(removed) if removed else 'none'}")
 
     log("7/7 publish and read back")

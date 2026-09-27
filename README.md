@@ -37,6 +37,8 @@ python3 -m brainfreeze_studio deploy build/workspace --environment https://<org>
 
 `deploy` prints a `maker:` link that opens the agent's test chat. `--draft` leaves it unpublished; run it again
 without `--draft` to publish. copilot-harness-sdk's `scripts/deploy-harness-agent.mjs` deploys the same workspace.
+Add `--plan` to preview creates, in-place updates and component removals with read-only requests; it changes
+nothing and never publishes, with or without `--draft`. `--plan --json` prints the plan as JSON.
 
 The build is offline and deterministic: the same egg always gives the same workspace. The egg is verified
 first, and its agents' contracts are read statically, so no code from the egg runs during a build.
@@ -167,7 +169,10 @@ python3 -m brainfreeze_studio rapplication @rapp/json_doctor --translations tran
     --environment https://yourorg.crm.dynamics.com/ --deploy     # signs in with az; omit --deploy to stay offline
 ```
 
-`--draft` leaves the agent unpublished, and `--no-app` deploys the agent without its code app.
+`--draft` leaves the agent unpublished. `--no-app` leaves the code app and its Power Apps flows out of both the
+build and deploy, so no Node or npm is needed.
+Add `--plan` with `--deploy` to preview the agent, its app flows and the code app without changing the environment;
+`--plan --json` prints the plan as JSON.
 
 A RAPP Store rapplication (`manifest.json`, `singleton/<id>_agent.py`, `ui/index.html`, each file checked against
 the catalog's SHA-256), or a rapp/1 `rapplication` egg, builds like a one-agent brainstem, and its UI becomes a

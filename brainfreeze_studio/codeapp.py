@@ -392,7 +392,12 @@ def build_host(build_dir=None, outfile=None, sdk_alias=None, npm="npm", log=prin
     stamp = build / "node_modules" / ".bfs-package.json"
     if not esbuild.exists() or not stamp.exists() or stamp.read_bytes() != (HOST_DIR / "package.json").read_bytes():
         log(f"   npm install in {build}")
-        subprocess.run([npm, "install", "--no-audit", "--no-fund", "--loglevel=error"], cwd=build, check=True)
+        installed = subprocess.run([npm, "install", "--no-audit", "--no-fund", "--loglevel=error"], cwd=build,
+                                   capture_output=True, text=True)
+        for output in (installed.stdout, installed.stderr):
+            if output.strip():
+                log(output.rstrip())
+        installed.check_returncode()
         stamp.write_bytes((HOST_DIR / "package.json").read_bytes())
     out = Path(outfile).expanduser() if outfile else build / "dist" / "host.js"
     out.parent.mkdir(parents=True, exist_ok=True)
