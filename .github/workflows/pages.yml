@@ -1,0 +1,39 @@
+# Publishes site/ (the onboarding page, its setup skill and contract) to GitHub Pages,
+# after checking that every command it gives still parses and every link resolves.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the site against the command line
+        run: |
+          python -m pip install --quiet "git+https://github.com/kody-w/rapp-brainfreeze.git"
+          python -m unittest tests/test_onboarding_site.py -v
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

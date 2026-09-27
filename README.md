@@ -17,16 +17,26 @@ that workspace to Copilot Studio as-is.
 egg ──brainfreeze-studio build──▶ harness workspace ──copilot-harness-sdk deploy──▶ Copilot Studio agent
 ```
 
+**Let your AI do it:** [the onboarding page](https://kody-w.github.io/rapp-brainfreeze-studio/) gives you one line to
+paste into GitHub Copilot or Claude Code. Your AI installs the tools, builds and proves your agent, and deploys it to
+the environment you pick as a Draft. You only sign in and say yes.
+
 ## Use it
 
 ```bash
-git clone https://github.com/kody-w/copilot-harness-sdk.git   # for its proven infrastructure profiles
-python3 -m brainfreeze_studio build https://raw.githubusercontent.com/kody-w/rapp-egg-hub/main/eggs/invoice-desk.egg \
-    --name "Invoice Desk" --publisher-prefix rapp --sdk-dir copilot-harness-sdk --out build/
+python3 -m pip install git+https://github.com/kody-w/rapp-brainfreeze.git   # freezes a brainstem into an egg
+python3 -m brainfreeze egg ~/.brainstem/src/rapp_brainstem --owner you --slug my-desk --no-memory --out eggs/
+git clone https://github.com/kody-w/copilot-harness-sdk.git                  # for its proven infrastructure profiles
+python3 -m brainfreeze_studio build eggs/you--my-desk.egg --name "My Desk" --publisher-prefix rapp \
+    --sdk-dir copilot-harness-sdk --out build/
 
-node copilot-harness-sdk/scripts/deploy-harness-agent.mjs --name "Invoice Desk" --publisher-prefix rapp \
-    --schema-name rapp_InvoiceDesk --workspace-dir build/workspace --environment https://<org>.crm.dynamics.com/
+az login --allow-no-subscriptions                    # as yourself: the deploy runs with your own rights
+python3 -m brainfreeze_studio environments           # the environments that sign-in can reach
+python3 -m brainfreeze_studio deploy build/workspace --environment https://<org>.crm.dynamics.com/ --draft
 ```
+
+`deploy` prints a `maker:` link that opens the agent's test chat. `--draft` leaves it unpublished; run it again
+without `--draft` to publish. copilot-harness-sdk's `scripts/deploy-harness-agent.mjs` deploys the same workspace.
 
 The build is offline and deterministic: the same egg always gives the same workspace. The egg is verified
 first, and its agents' contracts are read statically, so no code from the egg runs during a build.
@@ -156,6 +166,8 @@ python3 -m brainfreeze_studio codeapp-host             # optional: builds the co
 python3 -m brainfreeze_studio rapplication @rapp/json_doctor --translations translations/ --out out/ \
     --environment https://yourorg.crm.dynamics.com/ --deploy     # signs in with az; omit --deploy to stay offline
 ```
+
+`--draft` leaves the agent unpublished, and `--no-app` deploys the agent without its code app.
 
 A RAPP Store rapplication (`manifest.json`, `singleton/<id>_agent.py`, `ui/index.html`, each file checked against
 the catalog's SHA-256), or a rapp/1 `rapplication` egg, builds like a one-agent brainstem, and its UI becomes a
