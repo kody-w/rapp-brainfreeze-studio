@@ -38,8 +38,11 @@ python3 -m brainfreeze_studio deploy build/workspace --environment https://<org>
 `deploy` prints a `maker:` link that opens the agent's test chat. `--draft` leaves it unpublished; run it again
 without `--draft` to publish. copilot-harness-sdk's `scripts/deploy-harness-agent.mjs` deploys the same workspace.
 
-The build is offline and deterministic: the same egg always gives the same workspace. The egg is verified
-first, and its agents' contracts are read statically, so no code from the egg runs during a build.
+The build verifies the egg first and reads its agents' contracts statically. With `--translations`, proofs run
+the agent's Python on this computer in a separate process with a clean, allow-listed environment and a temporary
+home and working folder (file proofs use temporary fixture folders). Recorded proofs run no code.
+This is not a sandbox: the code can still read any file this user can read by absolute path, and use the network.
+Build only eggs you trust.
 
 | Output | What it is |
 |---|---|

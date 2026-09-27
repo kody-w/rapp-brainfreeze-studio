@@ -2,7 +2,7 @@
 
 Many agents are pure functions over bundled synthetic data: an ``operation`` enum, a few record
 selectors, and deterministic formatting. For those, the most faithful Power Platform translation is
-the agent's own behavior, materialized: run the real agent.py (sandboxed: network off, clock frozen)
+the agent's own behavior, materialized: run the real agent.py (effects monitored, clock frozen)
 over every input its contract declares, learn how each string input is matched, and lay a flow that
 returns exactly what the Python returns.
 
@@ -41,12 +41,15 @@ import base64
 import hashlib
 import json
 import os
+import platform
 import random
 import re
 import shutil
+import site
 import string
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import weakref
 from pathlib import Path
@@ -126,18 +129,18 @@ def _offset_fits(strings, clocks):
             continue
         tries = []
         if precision == "days":
-            tries.append((n, "days", {(p.date() - c.date()).days for p, c in zip(parsed, clocks)}, ""))
+            tries.append((n, "days", {(p.date() - c.date()).days for p, c in _zip_exact(parsed, clocks)}, ""))
         else:
             base = [c.replace(second=0, microsecond=0) if precision == "minutes" else c for c in clocks]
-            tries.append((n, "seconds", {int((p - b).total_seconds()) for p, b in zip(parsed, base)}, ""))
+            tries.append((n, "seconds", {int((p - b).total_seconds()) for p, b in _zip_exact(parsed, base)}, ""))
             if len({s[10:] for s in strings}) == 1:     # a date that follows the clock, at a fixed time of day
-                tries.append((8, "days", {(p.date() - c.date()).days for p, c in zip(parsed, clocks)}, strings[0][10:]))
+                tries.append((8, "days", {(p.date() - c.date()).days for p, c in _zip_exact(parsed, clocks)}, strings[0][10:]))
         for m, unit, ks, suffix in tries:
             if len(ks) != 1:
                 continue
             k = next(iter(ks))
             shift = _d.timedelta(**{unit: k})
-            if all(DATE_FORMATS[m][0](c + shift) + suffix == s for c, s in zip(clocks, strings)):
+            if all(DATE_FORMATS[m][0](c + shift) + suffix == s for c, s in _zip_exact(clocks, strings)):
                 fits.append((m, unit, k, suffix))
     return fits
 
@@ -147,9 +150,11 @@ def _clock_template(runs, clocks=CLOCKS, rerun=None):
     known formats at a fixed offset from the clock (today, or today + k days), return (templates, formats) with
     ZQCLOCK… placeholders; else None. rerun(case indexes, clock) settles a format the clocks leave ambiguous."""
     import datetime as _d
+    if not runs or len(runs) != len(clocks):
+        raise MaterializeError("clock proof needs one complete run per scheduled clock")
     cl = [_d.datetime.fromisoformat(x) for x in clocks]
     pending = []                            # per case: its texts and, per date, a literal or its candidate fits
-    for outs in zip(*runs):
+    for outs in _zip_exact(*runs):
         if all(o == outs[0] for o in outs[1:]):
             pending.append(outs[0])
             continue
@@ -178,7 +183,7 @@ def _clock_template(runs, clocks=CLOCKS, rerun=None):
         if rerun is None:
             return None
         extra = _d.datetime.fromisoformat(_DISAMBIGUATION_DAY) - _d.timedelta(**{unit: k})
-        for j, out in zip(cases, rerun(cases, extra.isoformat())):
+        for j, out in _zip_exact(cases, rerun(cases, extra.isoformat())):
             texts, dates = _split_dates(out)
             if texts != pending[j][0] or len(dates) != len(pending[j][1]):
                 return None
@@ -248,6 +253,175 @@ class MaterializeError(RuntimeError):
     pass
 
 
+def _zip_exact(*items):
+    """Python 3.9's zip has no strict flag. Never discard a missing case, clock or template."""
+    if len({len(x) for x in items}) > 1:
+        raise MaterializeError("proof refused: unequal case/result counts: " + ", ".join(str(len(x)) for x in items))
+    return zip(*items)
+
+
+class ProofProtocolError(MaterializeError):
+    def __init__(self, label, reason, scheduled, observed):
+        self.scheduled, self.observed = scheduled, observed
+        super().__init__(f"{label}: {reason} (scheduled={scheduled}, observed={observed})")
+
+
+def _unique_fields(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate JSON field")
+        out[key] = value
+    return out
+
+
+def _no_constant(value):
+    raise ValueError("non-finite JSON constant")
+
+
+class ProofResults:
+    """A result is usable only once, under its scheduled id and with the runner's exact record shape."""
+
+    def __init__(self, scheduled, kind, label):
+        self.scheduled, self.kind, self.label = scheduled, kind, label
+        self.observed, self.records = 0, {}
+
+    def fail(self, reason):
+        raise ProofProtocolError(self.label, reason, self.scheduled, self.observed)
+
+    def add(self, line, count=True):
+        if count:
+            self.observed += 1
+        try:
+            record = json.loads(line, object_pairs_hook=_unique_fields, parse_constant=_no_constant)
+        except (ValueError, TypeError):
+            self.fail("malformed result: expected one JSON object per line (stdout noise is not a result)")
+        if not isinstance(record, dict):
+            self.fail("malformed result: expected a JSON object")
+        if "case_id" not in record:
+            self.fail("malformed result: missing case_id")
+        ident = record["case_id"]
+        if type(ident) is not int or not 0 <= ident < self.scheduled:
+            self.fail("unexpected case_id: no such scheduled case")
+        if ident in self.records:
+            self.fail(f"duplicate result for case_id {ident}")
+        kind = self.kind[ident] if isinstance(self.kind, (list, tuple)) else self.kind
+        if kind in ("flow", "materialized"):
+            fields = {"case_id", "ok", "out"} | ({"effects"} if kind == "materialized" else set())
+            valid = type(record.get("ok")) is bool and isinstance(record.get("out"), str)
+            if kind == "materialized":
+                effects = record.get("effects")
+                valid = valid and isinstance(effects, list) and all(isinstance(e, str) for e in effects)
+        elif kind == "contract":
+            fields = {"case_id", "class", "name", "description", "parameters", "dicts"}
+            valid = (isinstance(record.get("class"), str) and isinstance(record.get("name"), (str, type(None)))
+                     and isinstance(record.get("description"), str) and isinstance(record.get("parameters"), dict)
+                     and isinstance(record.get("dicts"), dict))
+        elif kind == "connector-python":
+            fields = {"case_id", "output", "state"}
+            valid = isinstance(record.get("output"), str) and isinstance(record.get("state"), dict)
+        elif kind == "connector-code":
+            fields = {"case_id", "status", "body"}
+            valid = type(record.get("status")) is int and isinstance(record.get("body"), str)
+        else:
+            raise ValueError(f"unknown proof record kind: {kind}")
+        if set(record) != fields or not valid:
+            self.fail(f"malformed {kind} result for case_id {ident}: invalid fields or types")
+        self.records[ident] = record
+        return record
+
+    def finish(self):
+        if len(self.records) != self.scheduled:
+            self.fail("missing results: every scheduled case needs exactly one result")
+        return [self.records[i] for i in range(self.scheduled)]
+
+
+def proof_lines(stdout):
+    newline = b"\n" if isinstance(stdout, bytes) else "\n"
+    lines = stdout.split(newline) if stdout else []
+    if lines and lines[-1] == newline[:0]:
+        lines.pop()                       # only the record terminator; a blank stdout line is still refused
+    return lines
+
+
+def proof_results(stdout, scheduled, kind, label):
+    lines = proof_lines(stdout)
+    results = ProofResults(scheduled, kind, label)
+    results.observed = len(lines)
+    for line in lines:
+        results.add(line, count=False)
+    return results.finish()
+
+
+def complete_proof(report, scheduled):
+    """Legacy recorded proofs lack scheduled/observed, but their pinned spec and exact counts are mandatory."""
+    return (scheduled > 0 and report.get("parity") is True
+            and all(type(report.get(k)) is int and report[k] == scheduled for k in ("cases", "passed"))
+            and all(k not in report or (type(report[k]) is int and report[k] == scheduled)
+                    for k in ("scheduled", "observed", "observed_python", "observed_code")))
+
+
+def proof_environment(work, extra=None, hashseed="0"):
+    """Isolate credentials in the environment and the real home/working folder, NOT a sandbox.
+
+    The code can still read any file this user can read by absolute path, and use the network.
+    Explicit spec/case variables are inputs, never a copy of the operator's environment.
+    """
+    allowed = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
+    env = {k: os.environ[k] for k in allowed if k in os.environ}
+    env.update({k.upper() if os.name == "nt" else k: str(v) for k, v in (extra or {}).items()})
+    # Do not put this interpreter's stdlib ahead of a different minor version's own stdlib.
+    stdlib = {str(Path(p).resolve()) for k, p in sysconfig.get_paths().items() if k in ("stdlib", "platstdlib")}
+    stdlib.update(str(Path(p) / "lib-dynload") for p in list(stdlib))
+    usersite = site.getusersitepackages()
+    paths = (usersite if isinstance(usersite, list) else [usersite]) + list(sys.path)
+    paths = [str(Path(p or os.getcwd()).resolve()) for p in paths]
+    paths = [p for p in paths if p not in stdlib
+             and Path(p).name != f"python{sys.version_info[0]}{sys.version_info[1]}.zip"]
+    work = str(Path(work).resolve())
+    env.update(HOME=work, USERPROFILE=work, TMPDIR=work, TMP=work, TEMP=work,
+               PYTHONPATH=os.pathsep.join(dict.fromkeys(paths)), PYTHONIOENCODING="utf-8",
+               PYTHONHASHSEED=str(hashseed))
+    return env
+
+
+def proof_python(python=None):
+    executable = os.fspath(python or sys.executable)
+    return str(Path(executable).expanduser().absolute()) if os.path.dirname(executable) else executable
+
+
+# The limits run after exec, not in preexec_fn: fork-time Python callbacks can deadlock a threaded Function host.
+# Darwin's RLIMIT_AS is not a reliable limit for framework Python's reserved address space; Linux gets 4 GiB.
+PROOF_BOOTSTRAP = r'''
+import json as _proof_json, os as _proof_os, sys as _proof_sys
+# Reserve the result pipe before imports; Python print(), sys.__stdout__ and native fd 1 go to diagnostics.
+_proof_stdout = _proof_os.fdopen(_proof_os.dup(1), "w", encoding="utf-8", buffering=1)
+_proof_os.dup2(2, 1)
+_proof_sys.stdout = _proof_sys.stderr
+def _proof_send(record):
+    _proof_stdout.write(_proof_json.dumps(record, ensure_ascii=True, allow_nan=False, default=str) + "\n")
+    _proof_stdout.flush()
+_proof_fixed_env = {k: _proof_os.environ[k] for k in (
+    "HOME", "USERPROFILE", "TMPDIR", "TMP", "TEMP", "PYTHONPATH", "PYTHONIOENCODING", "PYTHONHASHSEED")
+    if k in _proof_os.environ}
+def _proof_case_env(values):
+    _proof_os.environ.update(values)
+    _proof_os.environ.update(_proof_fixed_env)
+if _proof_os.name == "posix":
+    import resource as _proof_resource
+    def _proof_limit(which, maximum):
+        soft, hard = _proof_resource.getrlimit(which)
+        if hard != _proof_resource.RLIM_INFINITY:
+            maximum = min(maximum, hard)
+        if soft != _proof_resource.RLIM_INFINITY:
+            maximum = min(maximum, soft)
+        _proof_resource.setrlimit(which, (maximum, maximum))
+    _proof_limit(_proof_resource.RLIMIT_CPU, 600)
+    if _proof_sys.platform.startswith("linux"):
+        _proof_limit(_proof_resource.RLIMIT_AS, 4 * 1024 ** 3)
+'''
+
+
 def sentinel(name):
     """An ASCII placeholder that survives str(), repr() and json.dumps() unchanged."""
     return "ZQ" + re.sub(r"[^A-Za-z0-9]", "", name).upper() + "QZ"
@@ -262,9 +436,9 @@ def _b64(text):
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-# ── the sandboxed runner ─────────────────────────────────────────────────────
+# ── the isolated, effect-monitored runner (not a sandbox) ─────────────────────
 
-RUNNER = r'''
+RUNNER = PROOF_BOOTSTRAP + r'''
 import builtins, datetime as _dt, importlib.abc, importlib.util, io, json, os, socket, subprocess, sys, time as _time, types
 
 agent_file, basic_file, clock_iso, class_name = sys.argv[1:5]
@@ -404,18 +578,20 @@ for line in sys.stdin:
     req = json.loads(line)
     if req.get("op") == "contract":
         md = getattr(agent, "metadata", None) or {}
-        print(json.dumps({"class": type(agent).__name__, "name": md.get("name") or getattr(agent, "name", None),
-                          "description": md.get("description", ""), "parameters": md.get("parameters") or {},
-                          "dicts": _dicts()}, default=str), flush=True)
+        _proof_send({"case_id": req["case_id"], "class": type(agent).__name__,
+                     "name": md.get("name") or getattr(agent, "name", None),
+                     "description": md.get("description", ""), "parameters": md.get("parameters") or {},
+                     "dicts": _dicts()})
         continue
     _EFFECTS.clear()
     try:
         out = agent.perform(**req["args"])
-        print(json.dumps({"ok": True, "out": out if isinstance(out, str) else json.dumps(out, default=str),
-                          "effects": sorted(_EFFECTS | _AT_IMPORT)}), flush=True)
+        _proof_send({"case_id": req["case_id"], "ok": True,
+                     "out": out if isinstance(out, str) else json.dumps(out, default=str),
+                     "effects": sorted(_EFFECTS | _AT_IMPORT)})
     except Exception as e:
-        print(json.dumps({"ok": False, "out": f"{type(e).__name__}: {e}", "effects": sorted(_EFFECTS | _AT_IMPORT)}),
-              flush=True)
+        _proof_send({"case_id": req["case_id"], "ok": False, "out": f"{type(e).__name__}: {e}",
+                     "effects": sorted(_EFFECTS | _AT_IMPORT)})
 '''
 
 
@@ -456,12 +632,12 @@ def dataset_digest(folder):
 
 
 class Runner:
-    """Runs one agent file's perform() in a sandboxed subprocess, a batch of cases at a time. `env` sets fixed
-    variables; `data` ({variable: folder}) gives the agent a private copy of each pinned folder."""
+    """Runs perform() in a clean environment and temporary home/cwd, NOT a sandbox. `env` sets fixed inputs;
+    `data` ({variable: folder}) gives the agent a private copy of each pinned folder."""
 
     def __init__(self, agent_file, basic_file, class_name="", python=None, timeout=600, env=None, data=None):
-        self.agent_file, self.basic_file = str(agent_file), str(basic_file)
-        self.class_name, self.python, self.timeout = class_name or "", python or sys.executable, timeout
+        self.agent_file, self.basic_file = str(Path(agent_file).resolve()), str(Path(basic_file).resolve())
+        self.class_name, self.python, self.timeout = class_name or "", proof_python(python), timeout
         self.calls = 0
         self._version = None
         self.effects = set()     # what perform() reached beyond its arguments, over every call
@@ -476,25 +652,35 @@ class Runner:
                 self.pinned.append(str(copy))
 
     def python_version(self):
+        if self._version is None and self.python == proof_python():
+            self._version = platform.python_version()
         if self._version is None:
-            self._version = subprocess.run([self.python, "-c", "import platform; print(platform.python_version())"],
-                                           capture_output=True, text=True, timeout=60).stdout.strip()
+            with tempfile.TemporaryDirectory(prefix="bfs-version-") as work:
+                self._version = subprocess.run([self.python, "-B", "-c", "import platform; print(platform.python_version())"],
+                                               capture_output=True, text=True, timeout=60, check=True,
+                                               cwd=work, env=proof_environment(work)).stdout.strip()
         return self._version
 
     def _exchange(self, requests, clock=CLOCKS[0], hashseed="0"):
-        env = {**self.env, "PYTHONHASHSEED": str(hashseed), "PATH": "/usr/bin:/bin",
-               "HOME": str(Path(self.agent_file).parent)}
-        payload = "".join(json.dumps(r) + "\n" for r in requests)
-        argv = [self.python, "-c", RUNNER, self.agent_file, self.basic_file, clock, self.class_name]
+        payload = "".join(json.dumps(dict(r, case_id=i)) + "\n" for i, r in enumerate(requests))
+        argv = [self.python, "-B", "-c", RUNNER, self.agent_file, self.basic_file, clock, self.class_name]
         if self.pinned:
             argv.append(json.dumps(self.pinned))
-        proc = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=self.timeout, env=env)
-        lines = [l for l in proc.stdout.splitlines() if l.strip()]
-        if proc.returncode != 0 or len(lines) != len(requests):
-            raise MaterializeError(f"{Path(self.agent_file).name}: runner failed "
-                                   f"({len(lines)}/{len(requests)} answers): {proc.stderr.strip()[-600:]}")
+        label = f"{Path(self.agent_file).name}: Python runner"
+        with tempfile.TemporaryDirectory(prefix="bfs-materialize-") as work:
+            try:
+                proc = subprocess.run(argv, input=payload.encode("utf-8"), capture_output=True, timeout=self.timeout,
+                                      env=proof_environment(work, self.env, hashseed), cwd=work)
+            except subprocess.TimeoutExpired as e:
+                raise ProofProtocolError(label, "runner timed out", len(requests), len(proof_lines(e.stdout))) from None
+            except OSError:
+                raise ProofProtocolError(label, "runner could not start", len(requests), 0) from None
+        kinds = ["contract" if r.get("op") == "contract" else "materialized" for r in requests]
+        answers = proof_results(proc.stdout, len(requests), kinds, label)
+        if proc.returncode != 0:
+            raise ProofProtocolError(label, f"runner exited with status {proc.returncode}", len(requests), len(answers))
         self.calls += len(requests)
-        return [json.loads(l) for l in lines]
+        return answers
 
     def contract(self):
         return self._exchange([{"op": "contract"}])[0]
@@ -612,7 +798,7 @@ class Discovery:
                     args[name] = v
                 cases.append(args)
                 idx.append((ci, v))
-        for key, out in zip(idx, self.r.run(cases)):
+        for key, out in _zip_exact(idx, self.r.run(cases)):
             table[key] = out
 
     def _check(self, name, contexts, table, probes, rule, canon_map=None, resolver=None, empty_is_absent=False,
@@ -828,7 +1014,7 @@ def _key_inputs(disc):
 
 def _sub(out, keyed, states, args):
     """Put the real unknown values back where the sentinels were."""
-    for i, st in zip(keyed, states):
+    for i, st in _zip_exact(keyed, states):
         if st == UNKNOWN:
             val = args.get(i["name"], "")
             out = out.replace(sentinel(i["name"]), json_escaped(val) if i.get("json_echo") else val)
@@ -893,7 +1079,7 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
                 probe_cases.append(args_for(pv, {i["name"]: (st, v)}))
                 owners.append(i)
         if probe_cases:
-            for i, out in zip(owners, runner.run(probe_cases)):
+            for i, out in _zip_exact(owners, runner.run(probe_cases)):
                 if out != base and i not in relevant:
                     relevant.append(i)
         # numbers that change this operation block it (they need a hand translation); probed jointly
@@ -930,7 +1116,7 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
                 break
             cases = [args_for(pv, asg) for _, asg in combos]
             outs = runner.run(cases)
-            rows = {"|".join([pst] + sts): o for (sts, _), o in zip(combos, outs)}
+            rows = {"|".join([pst] + sts): o for (sts, _), o in _zip_exact(combos, outs)}
             # verify on random samples over every keyed input (not just the relevant ones)
             sample_cases, sample_keys = [], []
             # with no other input to vary every sample is the same call: one is enough (determinism across repeated
@@ -947,7 +1133,7 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
                 sample_keys.append(("|".join([pst] + [asg[i["name"]][0] for i in relevant]), a))
             got = runner.run(sample_cases)
             bad = None
-            for (key, a), g in zip(sample_keys, got):
+            for (key, a), g in _zip_exact(sample_keys, got):
                 want = rows.get(key)
                 if want is None:
                     bad = (a, "no row")
@@ -994,8 +1180,7 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
     if blocked_ops and len(blocked_ops) == len(ops):
         blockers.append("every operation depends on " + ", ".join(sorted({n for v in blocked_ops.values() for n in v})))
     if runner.effects:
-        # the sandbox answered those calls with errors (no files, no network, no LLM), so a table of its answers would
-        # be a table of errors; these agents need a translation that reaches the same things in Power Platform
+        # Effect monitoring refuses tables that depend on files, network or host services. It is not a sandbox.
         report["effects"] = sorted(runner.effects)
         blockers.insert(0, "reaches beyond its arguments: " + ", ".join(EFFECTS[e] for e in sorted(runner.effects)))
     if blockers:
@@ -1010,7 +1195,7 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
         seed1 = runner.run(cases_all, hashseed="1")
         if seed1 != runner.run(cases_all):
             varying = sorted({json.dumps(c.get(primary["name"]) if primary else "*") for c, a, b in
-                              zip(cases_all, seed1, runner.run(cases_all)) if a != b})
+                              _zip_exact(cases_all, seed1, runner.run(cases_all)) if a != b})
             if not allow_hash_variation:
                 report["reasons"] = ["output changes with PYTHONHASHSEED (set or hash ordering) for " + ", ".join(varying)]
                 return None, report
@@ -1023,12 +1208,12 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
             templ = _clock_template(runs, CLOCKS,
                                     lambda idxs, clock: runner.run([cases_all[i] for i in idxs], clock=clock))
             if templ is None:
-                diff = next(k for k, outs in enumerate(zip(*runs)) if any(o != outs[0] for o in outs))
+                diff = next(k for k, outs in enumerate(_zip_exact(*runs)) if any(o != outs[0] for o in outs))
                 report["reasons"] = [f"output depends on the clock beyond printed dates (for example {json.dumps(cases_all[diff])})"]
                 return None, report
             outs_by_case, clock_formats = templ
             # table_rows and cases_all were built together, one row per case in order
-            table_rows = {key: t for key, t in zip(list(table_rows), outs_by_case)}
+            table_rows = {key: t for key, t in _zip_exact(list(table_rows), outs_by_case)}
             caveats.append("Dates the agent prints from its clock (today, or today plus a fixed number of days) are "
                            "filled from the flow's clock (UTC); a brainstem prints its host's local date.")
 
@@ -1139,7 +1324,7 @@ def _hand_operation(runner, h, pst, pv, relevant, rest, args_for, hand_keying, h
     outs = runner.run(cases)
     marker_outs = iter(runner.run([m for m in markers if m]))
     tokens = [f["token"] for f in h.get("fills") or []]
-    for key, out, m in zip(keys, outs, markers):
+    for key, out, m in _zip_exact(keys, outs, markers):
         if m:
             hand_holes[key] = (out, next(marker_outs), tokens)
     grid = [{}]
@@ -1155,7 +1340,7 @@ def _hand_operation(runner, h, pst, pv, relevant, rest, args_for, hand_keying, h
             vectors.append(dict(args_for(pv, full), **g))
     if len(vectors) > cap:
         vectors = rng.sample(vectors, cap)
-    return dict(zip(keys, outs)), cases, vectors
+    return dict(_zip_exact(keys, outs)), cases, vectors
 
 
 def info_values(info):

@@ -33,11 +33,14 @@ import math
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from . import StudioBuildError
+from .materialize import (PROOF_BOOTSTRAP, ProofProtocolError, _unique_fields, complete_proof,
+                          proof_environment, proof_lines, proof_results)
 
 # ── a small Workflow Definition Language evaluator ──────────────────────────
 
@@ -663,7 +666,7 @@ def run_flow(flow, trigger, parameter_values=None, now=None):
 
 # ── the parity proof ─────────────────────────────────────────────────────────
 
-_RUN_AGENT = r"""
+_RUN_AGENT = PROOF_BOOTSTRAP + r"""
 import importlib.util, json, os, sys, types
 class BasicAgent:
     def __init__(self, name=None, metadata=None, *a, **k):
@@ -674,14 +677,15 @@ spec = importlib.util.spec_from_file_location('agent_under_test', sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 cls = next(v for v in vars(m).values() if isinstance(v, type) and issubclass(v, BasicAgent) and v is not BasicAgent)
 agent = cls()
-for line in sys.stdin:
+for index, line in enumerate(sys.stdin):
     case = json.loads(line)
-    os.environ.update(case['env'])
+    ident = case.get('case_id', index)
+    _proof_case_env(case['env'])
     try:
         out = agent.perform(**case['args'])
-        print(json.dumps({'ok': True, 'out': str(out)}), flush=True)
+        _proof_send({'case_id': ident, 'ok': True, 'out': str(out)})
     except Exception as e:
-        print(json.dumps({'ok': False, 'out': f'{type(e).__name__}: {e}'}), flush=True)
+        _proof_send({'case_id': ident, 'ok': False, 'out': f'{type(e).__name__}: {e}'})
 """
 
 
@@ -707,17 +711,29 @@ def materialized_record_file(spec):
     return Path(spec["_dir"]) / (Path(spec.get("_file") or f"{spec['flow_name']}.json").stem + ".proof.json")
 
 
+def materialized_schedule(spec):
+    from .materialize import CLOCKS
+    blocked, primary = set(spec.get("blocked_operations") or {}), spec.get("primary")
+    vectors = [v for v in spec["vectors"] if not (primary and v.get(primary) in blocked)]
+    first = (spec.get("materialized_with") or {}).get("clock") or CLOCKS[0]
+    clocks = [first] + ([c for c in CLOCKS if c != first] if spec.get("clock_formats") else [])
+    return vectors, clocks
+
+
 def record_materialized(spec, report, basic_sha256, when):
     """What a passing materialized proof leaves behind, pinned to the exact bytes it held for: the agent's source, its
     BasicAgent, the spec (which pins the dataset's digest). A build that can't run the proof (no dataset there, or no
     agent code may run, as in a hosted service) lays the flow only on this record."""
     from .connector_code import spec_sha256
-    if not report.get("parity"):
-        raise StudioBuildError(f"only a passing proof is recorded ({report.get('passed')}/{report.get('cases')})")
+    vectors, clocks = materialized_schedule(spec)
+    scheduled = len(vectors) * len(clocks)
+    if not complete_proof(report, scheduled):
+        raise StudioBuildError(f"only a passing proof covering exactly {scheduled} scheduled cases is recorded")
     return {"agent": spec["agent"], "mode": "materialized", "source_sha256": spec["source_sha256"],
             "basic_sha256": basic_sha256, "spec_sha256": spec_sha256(spec),
             "data": {k: v["sha256"] for k, v in (spec.get("data") or {}).items()},
-            "cases": report["cases"], "passed": report["passed"], "clocks": report.get("clocks"),
+            "cases": scheduled, "scheduled": scheduled, "observed": scheduled,
+            "passed": scheduled, "clocks": clocks,
             "python": report.get("python"), "parity": True, "proven": when}
 
 
@@ -728,49 +744,62 @@ def recorded_materialized_proof(spec, source_sha256, basic_sha256):
     f = materialized_record_file(spec)
     if not f.is_file():
         return None
-    rec = json.loads(f.read_text(encoding="utf-8"))
-    if not (rec.get("parity") and rec.get("mode") == "materialized" and rec.get("source_sha256") == source_sha256
-            and rec.get("basic_sha256") == basic_sha256 and rec.get("spec_sha256") == spec_sha256(spec)):
+    try:
+        rec = json.loads(f.read_text(encoding="utf-8"), object_pairs_hook=_unique_fields)
+    except (ValueError, OSError):
         return None
-    return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": rec["cases"], "passed": rec["passed"],
-            "parity": True, "mode": "materialized", "recorded": rec["proven"], "clocks": rec.get("clocks"),
+    vectors, clocks = materialized_schedule(spec)
+    scheduled = len(vectors) * len(clocks)
+    if not (isinstance(rec, dict) and complete_proof(rec, scheduled) and rec.get("mode") == "materialized"
+            and rec.get("source_sha256") == source_sha256
+            and rec.get("basic_sha256") == basic_sha256 and rec.get("spec_sha256") == spec_sha256(spec)
+            and isinstance(rec.get("proven"), str)):
+        return None
+    return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": scheduled, "passed": scheduled,
+            "scheduled": scheduled, "observed": scheduled,
+            "parity": True, "mode": "materialized", "recorded": rec["proven"], "clocks": clocks,
             "python": rec.get("python"), "mismatches": [], "blocked_operations": spec.get("blocked_operations") or {},
             "approximated_inputs": [k["input"] for k in spec["keying"] if k.get("approximated")],
             **({"data": rec["data"]} if rec.get("data") else {})}
 
 
 def prove_materialized(spec, agent_file, basic_file, schema_name=None):
-    """Every vector through the real agent.py (sandboxed, same frozen clock) and through the compiled flow. A spec
+    """Every vector through the real agent.py (isolated, NOT sandboxed, same clock) and through the compiled flow. A spec
     materialized over pinned data is proven on that exact data, or refused."""
-    from .materialize import CLOCKS, Runner, agent_python
+    from .materialize import MaterializeError, Runner, _zip_exact, agent_python
+    vectors, clocks = materialized_schedule(spec)
+    scheduled = len(vectors) * len(clocks)
     data, why = pinned_data(spec)
     if why:
-        return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": 0, "passed": 0, "parity": False,
+        return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": scheduled,
+                "scheduled": scheduled, "observed": 0, "passed": 0, "parity": False,
                 "mode": "materialized", "reason": why, "mismatches": [], "blocked_operations": {},
                 "approximated_inputs": []}
     flow = compile_materialized(spec, schema_name)
-    blocked = set(spec.get("blocked_operations") or {})
-    primary = spec.get("primary")
-    vectors = [v for v in spec["vectors"] if not (primary and v.get(primary) in blocked)]
-    # a flow that fills dates from its clock is proven on every frozen clock, not just the one it was built on
-    first = (spec.get("materialized_with") or {}).get("clock") or CLOCKS[0]
-    clocks = [first] + ([c for c in CLOCKS if c != first] if spec.get("clock_formats") else [])
     runner = Runner(agent_file, basic_file, spec.get("class") or "",
                     python=agent_python((spec.get("materialized_with") or {}).get("python")),
                     env=spec.get("env"), data=data)
-    results = []
-    for clock in clocks:
-        for vec, py in zip(vectors, runner.run(vectors, clock=clock)):
-            try:
-                flow_out = _str(run_flow(flow, vec, now=clock).get("result"))
-            except StudioBuildError as e:
-                flow_out = f"FLOW ERROR: {e}"
-            results.append({"args": vec, "clock": clock, "python": py, "flow": flow_out, "match": py == flow_out})
+    results, observed, reason = [], 0, None
+    try:
+        for clock in clocks:
+            answers = runner.run(vectors, clock=clock)
+            observed += len(answers)
+            for vec, py in _zip_exact(vectors, answers):
+                try:
+                    flow_out = _str(run_flow(flow, vec, now=clock).get("result"))
+                except StudioBuildError as e:
+                    flow_out = f"FLOW ERROR: {e}"
+                results.append({"args": vec, "clock": clock, "python": py, "flow": flow_out, "match": py == flow_out})
+    except MaterializeError as e:
+        observed += e.observed if isinstance(e, ProofProtocolError) else 0
+        reason = str(e)
     passed = sum(r["match"] for r in results)
-    return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": len(results), "passed": passed,
-            "clocks": clocks, "python": runner.python_version(),
+    return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": scheduled, "passed": passed,
+            "scheduled": scheduled, "observed": observed,
+            "clocks": clocks, "python": runner.python_version() if reason is None else None,
             **({"data": {k: v["sha256"] for k, v in spec["data"].items()}} if spec.get("data") else {}),
-            "parity": passed == len(results) and len(results) > 0, "mode": "materialized",
+            "parity": reason is None and passed == scheduled and scheduled > 0, "mode": "materialized",
+            **({"reason": reason} if reason else {}),
             "blocked_operations": spec.get("blocked_operations") or {},
             "approximated_inputs": [k["input"] for k in spec["keying"] if k.get("approximated")],
             "mismatches": [r for r in results if not r["match"]][:25],
@@ -791,14 +820,32 @@ def prove(spec, agent_file, schema_name, compare_output="result", basic_file=Non
         values = [str(meta["default"])] + [str(v) for v in meta.get("test_values", [])]
         setting_cases = [dict(c, **{key: v}) for c in setting_cases for v in values]
     cases = [(vec, env) for env in setting_cases for vec in spec["vectors"]]
-    lines = "".join(json.dumps({"args": vec, "env": {k: v for k, v in env.items()}}) + "\n" for vec, env in cases)
-    proc = subprocess.run([sys.executable, "-c", _RUN_AGENT, str(agent_file)], input=lines,
-                          capture_output=True, text=True, timeout=120)
-    if proc.returncode != 0:
-        raise StudioBuildError(f"the agent could not be run for the proof: {proc.stderr.strip()[-400:]}")
-    python_out = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+    scheduled = len(cases)
+    report = {"agent": spec["agent"], "flow": spec["flow_name"], "cases": scheduled, "scheduled": scheduled,
+              "observed": 0, "passed": 0, "parity": False, "mismatches": [], "flow_json": flow, "_all": [],
+              "evaluator_note": "Flow side evaluated offline with .NET formatting semantics; confirm one case live."}
+    lines = "".join(json.dumps({"case_id": i, "args": vec, "env": env}) + "\n"
+                    for i, (vec, env) in enumerate(cases))
+    try:
+        with tempfile.TemporaryDirectory(prefix="bfs-flow-proof-") as work:
+            proc = subprocess.run([sys.executable, "-B", "-c", _RUN_AGENT, str(Path(agent_file).resolve())],
+                                  input=lines.encode("utf-8"), capture_output=True, timeout=120,
+                                  env=proof_environment(work), cwd=work)
+        python_out = proof_results(proc.stdout, scheduled, "flow", "Python runner")
+        if proc.returncode != 0:
+            raise ProofProtocolError("Python runner", f"runner exited with status {proc.returncode}",
+                                     scheduled, len(python_out))
+    except ProofProtocolError as e:
+        report.update(observed=e.observed, reason=str(e))
+        return report
+    except (subprocess.TimeoutExpired, OSError) as e:
+        observed = len(proof_lines(e.stdout)) if isinstance(e, subprocess.TimeoutExpired) else 0
+        why = "runner timed out" if isinstance(e, subprocess.TimeoutExpired) else "runner could not start"
+        report.update(observed=observed, reason=str(ProofProtocolError("Python runner", why, scheduled, observed)))
+        return report
     results = []
-    for (vec, env), py in zip(cases, python_out):
+    for i, (vec, env) in enumerate(cases):
+        py = python_out[i]                 # protocol validation guarantees exactly one result for this case
         pvals = {}
         for key, v in env.items():
             pname, _ = _setting_param(schema_name, key, spec["settings"][key])
@@ -807,11 +854,9 @@ def prove(spec, agent_file, schema_name, compare_output="result", basic_file=Non
             flow_out = _str(run_flow(flow, vec, pvals).get(compare_output))
         except StudioBuildError as e:
             flow_out = f"FLOW ERROR: {e}"
-        results.append({"args": vec, "settings": env, "python": py["out"], "flow": flow_out,
+        results.append({"case_id": i, "args": vec, "settings": env, "python": py["out"], "flow": flow_out,
                         "match": py["ok"] and py["out"] == flow_out})
     passed = sum(r["match"] for r in results)
-    return {"agent": spec["agent"], "flow": spec["flow_name"], "cases": len(results), "passed": passed,
-            "parity": passed == len(results) and len(results) > 0,
-            "mismatches": [r for r in results if not r["match"]],
-            "evaluator_note": "Flow side evaluated offline with .NET formatting semantics; confirm one case live.",
-            "flow_json": flow, "_all": results}
+    report.update(passed=passed, observed=len(python_out), parity=passed == scheduled and scheduled > 0,
+                  mismatches=[r for r in results if not r["match"]], _all=results)
+    return report
