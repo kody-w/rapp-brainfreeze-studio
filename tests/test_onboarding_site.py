@@ -3,11 +3,9 @@ These tests keep it true:
 - every command it gives parses with the real command line, and the skill and contract give the same ones;
 - every deploy is planned first and is a Draft;
 - the sample's answer and parity line are what the agent and the build really produce;
-- every link resolves;
-- the page works with and without JavaScript.
+- every link resolves.
 
-The browser checks need Playwright for Python with its Chromium (skipped otherwise):
-    python3 -m pip install playwright && python3 -m playwright install chromium
+Page rendering and browser checks live in tests.test_onboarding_page.
 """
 import html.parser
 import importlib.util
@@ -16,7 +14,6 @@ import json
 import os
 import re
 import shlex
-import struct
 import subprocess
 import sys
 import tempfile
@@ -30,11 +27,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 from brainfreeze_studio import __main__ as cli  # noqa: E402
 from test_rapplication import EXAMPLE, TRANSLATIONS, run_python_agent  # noqa: E402
-
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    sync_playwright = None
 
 CONTRACT = json.loads((SITE_DIR / "brainfreeze-studio.json").read_text(encoding="utf-8"))
 SITE = CONTRACT["site"]
@@ -345,120 +337,6 @@ class Links(unittest.TestCase):
         self.assertEqual(discovery["skill"], CONTRACT["skill"])
         for url in (CONTRACT["skill"], SITE + "brainfreeze-studio.json", SITE):
             self.assertIn(url, LLMS)
-
-
-def png_size(path):
-    data = path.read_bytes()
-    assert data[:8] == b"\x89PNG\r\n\x1a\n", f"{path.name} isn't a PNG"
-    return struct.unpack(">II", data[16:24])
-
-
-class Page(unittest.TestCase):
-    def test_every_line_to_paste_opens_this_site_and_asks_for_a_draft(self):
-        script = PAGE.split('<script>')[-1]
-        self.assertIn(f'const SITE = "{SITE}";', script)
-        tail = re.search(r'const TAIL = "([^"]+)";', script).group(1)
-        asks = dict(re.findall(r'\{ id: "(\w+)", label: "[^"]+", ask: "([^"]+)" \}', script))
-        self.assertEqual(set(asks), {"brainstem", "store", "sample"})
-        self.assertIn("keep it a Draft", tail)
-        static = re.search(r'<span id="prompt">(.*?)</span>', PAGE, re.S).group(1)
-        self.assertEqual(static, f"Open {SITE} and {asks['sample']}. {tail}")
-
-    def test_every_file_states_the_plan_and_draft_rules(self):
-        front = re.match(r"---\nname: (.+)\ndescription: (.+)\n---\n", SKILL)
-        self.assertEqual(front.group(1), "brainfreeze-studio")
-        self.assertTrue(front.group(2).strip())
-        for name, text in (("page", PAGE), ("skill", SKILL), ("CLAUDE.md", CLAUDE), ("llms.txt", LLMS),
-                           ("contract", json.dumps(CONTRACT))):
-            with self.subTest(file=name):
-                self.assertIn("--draft", text)
-                self.assertIn("--plan", text)
-
-    def test_it_never_says_every_agent_becomes_a_flow(self):
-        for name, text in (("page", PAGE), ("skill", SKILL), ("llms.txt", LLMS)):
-            with self.subTest(file=name):
-                self.assertNotRegex(text, r"(?i)its logic becomes real power platform flows|every agent becomes a flow")
-                self.assertIn("skill", text)
-
-    def test_the_social_preview_and_icons_exist_at_their_sizes(self):
-        self.assertEqual(png_size(SITE_DIR / "og.png"), (1200, 630))
-        self.assertEqual(png_size(SITE_DIR / "apple-touch-icon.png"), (180, 180))
-        for tag in ('property="og:image"', 'name="twitter:card"', 'rel="canonical"', 'name="color-scheme"'):
-            self.assertIn(tag, PAGE)
-
-    def test_a_missing_page_leads_back_home(self):
-        missing = (SITE_DIR / "404.html").read_text(encoding="utf-8")
-        self.assertIn(f'href="{SITE}"', missing)
-
-    def test_the_pages_workflow_checks_then_publishes_this_folder(self):
-        workflow = (ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
-        self.assertIn("path: site", workflow)
-        self.assertIn("tests/test_onboarding_site.py", workflow)
-        self.assertIn("playwright install", workflow)
-        self.assertLess(workflow.index("test_onboarding_site"), workflow.index("upload-pages-artifact"))
-
-
-@unittest.skipUnless(sync_playwright, "needs Playwright for Python with its Chromium")
-class PageInABrowser(unittest.TestCase):
-    def open(self, pw, **context):
-        browser = pw.chromium.launch()
-        page = browser.new_context(**context).new_page()
-        errors = []
-        page.on("pageerror", lambda e: errors.append(str(e)))
-        page.route("**/*", lambda route: route.abort() if not route.request.url.startswith("file:")
-                   else route.continue_())
-        page.goto((SITE_DIR / "index.html").as_uri())
-        return browser, page, errors
-
-    def test_the_pickers_change_the_line_to_paste_and_nothing_errors(self):
-        with sync_playwright() as pw:
-            browser, page, errors = self.open(pw)
-            prompt = page.locator("#prompt")
-            self.assertIn("Invoice Router sample", prompt.inner_text())
-            page.get_by_role("button", name="My Brainstem").click()
-            self.assertIn("put my Brainstem in Copilot Studio", prompt.inner_text())
-            self.assertEqual(page.get_by_role("button", name="My Brainstem").get_attribute("aria-pressed"), "true")
-            page.get_by_role("button", name="Claude Code").click()
-            self.assertEqual(page.locator("#paste-label").inner_text(), "Paste this into Claude Code")
-            page.get_by_role("button", name="By hand").click()
-            self.assertEqual(prompt.inner_text(), REPO + "#use-it")
-            self.assertTrue(page.locator("#source-picker").is_hidden())
-            browser.close()
-        self.assertEqual(errors, [])
-
-    def test_without_javascript_it_still_gives_a_line_to_paste_and_the_way_in(self):
-        with sync_playwright() as pw:
-            browser, page, _ = self.open(pw, java_script_enabled=False)
-            self.assertIn("Invoice Router sample", page.locator("#prompt").inner_text())
-            self.assertTrue(page.locator("noscript").count())
-            self.assertTrue(page.locator("#status").is_hidden(), "a no-JS visitor sees a check that never runs")
-            self.assertIn("setup skill", page.inner_text("body"))
-            browser.close()
-
-    def test_it_asks_before_looking_for_a_brainstem_where_the_browser_would_prompt(self):
-        with sync_playwright() as pw:
-            browser, page, errors = self.open(pw)
-            page.close()
-            page = browser.new_context().new_page()
-            page.add_init_script("""
-              window.__probes = 0;
-              const realFetch = window.fetch;
-              window.fetch = (url, opts) => { if (String(url).includes('localhost:7071')) window.__probes++; return realFetch(url, opts); };
-              navigator.permissions.query = async ({ name }) => {
-                if (name === 'local-network-access') return { state: 'prompt' };
-                throw new TypeError('unknown permission');
-              };""")
-            page.route("**/*", lambda route: route.abort() if not route.request.url.startswith("file:")
-                       else route.continue_())
-            page.goto((SITE_DIR / "index.html").as_uri())
-            page.wait_for_timeout(300)
-            self.assertEqual(page.evaluate("window.__probes"), 0, "looked for a Brainstem before being asked to")
-            button = page.get_by_role("button", name="Check this computer")
-            self.assertTrue(button.is_visible())
-            button.click()
-            page.wait_for_timeout(300)
-            self.assertEqual(page.evaluate("window.__probes"), 1)
-            browser.close()
 
 
 if __name__ == "__main__":

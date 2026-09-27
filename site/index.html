@@ -4,12 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>brainfreeze studio - Freeze your agent. Run it in Copilot Studio.</title>
-<meta name="description" content="Let your AI put your Brainstem or a RAPP Store app into your own Copilot Studio environment. Logic that can be translated becomes Power Platform flows, proven against your Python first.">
+<meta name="description" content="Matching shipped translations and reviewed source-matched profiles become Copilot Studio tools. Other RAPP agents become reasoning-only skills; the build says why.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://kody-w.github.io/rapp-brainfreeze-studio/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="brainfreeze studio: freeze your agent, run it in Copilot Studio">
-<meta property="og:description" content="Paste one line into your AI. It builds your agent, proves what it can translate, and deploys it to your own Copilot Studio environment as a Draft.">
+<meta property="og:description" content="Matching shipped translations and reviewed source-matched profiles become Copilot Studio tools. Other RAPP agents become reasoning-only skills; the build says why.">
 <meta property="og:url" content="https://kody-w.github.io/rapp-brainfreeze-studio/">
 <meta property="og:image" content="https://kody-w.github.io/rapp-brainfreeze-studio/og.png">
 <meta property="og:image:width" content="1200">
@@ -19,41 +19,47 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="alternate" type="application/json" href="brainfreeze-studio.json" title="brainfreeze studio setup contract">
 <link rel="alternate" type="text/plain" href="llms.txt" title="brainfreeze studio AI discovery">
-<meta name="theme-color" content="#0369a1">
+<meta name="theme-color" content="#f2f6f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1419" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230369a1'/%3E%3Cg fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg id='a'%3E%3Cpath d='M16 16V5.5'/%3E%3Cpath d='M13 7.8l3 3 3-3'/%3E%3C/g%3E%3Cuse href='%23a' transform='rotate%2860 16 16%29'/%3E%3Cuse href='%23a' transform='rotate%28120 16 16%29'/%3E%3Cuse href='%23a' transform='rotate%28180 16 16%29'/%3E%3Cuse href='%23a' transform='rotate%28240 16 16%29'/%3E%3Cuse href='%23a' transform='rotate%28300 16 16%29'/%3E%3C/g%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#f2f6f9;--card:#fff;--ink:#16202a;--muted:#546270;--line:#dbe4ec;--accent:#0369a1;--accent-soft:#0369a114;--code:#e9f0f5;--ok:#15803d;--bad:#b91c1c;--wait:#a16207}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d1419;--card:#141d24;--ink:#e6edf2;--muted:#93a3b1;--line:#243241;--accent:#38bdf8;--accent-soft:#38bdf81a;--code:#101920;--ok:#4ade80;--bad:#f87171;--wait:#facc15}}
-:root[data-theme="dark"]{--bg:#0d1419;--card:#141d24;--ink:#e6edf2;--muted:#93a3b1;--line:#243241;--accent:#38bdf8;--accent-soft:#38bdf81a;--code:#101920;--ok:#4ade80;--bad:#f87171;--wait:#facc15}
+:root{--bg:#f2f6f9;--card:#fff;--ink:#16202a;--muted:#546270;--line:#dbe4ec;--accent:#0369a1;--on-accent:#fff;--accent-soft:#0369a114;--code:#e9f0f5;--ok:#15803d;--wait:#a16207}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d1419;--card:#141d24;--ink:#e6edf2;--muted:#93a3b1;--line:#243241;--accent:#38bdf8;--on-accent:#0d1419;--accent-soft:#38bdf81a;--code:#101920;--ok:#4ade80;--wait:#facc15}}
+:root[data-theme="dark"]{--bg:#0d1419;--card:#141d24;--ink:#e6edf2;--muted:#93a3b1;--line:#243241;--accent:#38bdf8;--on-accent:#0d1419;--accent-soft:#38bdf81a;--code:#101920;--ok:#4ade80;--wait:#facc15}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
 .wrap{max-width:760px;margin:0 auto;padding:0 16px}
-header{padding:64px 0 48px;text-align:center}
-.mark{display:inline-grid;place-items:center;width:56px;height:56px;border-radius:30%;background:var(--accent);margin-bottom:18px}
+header{padding:38px 0 32px;text-align:center}
+.mark{display:grid;place-items:center;width:48px;height:48px;border-radius:30%;background:var(--accent);margin:0 auto 14px}
 .mark svg{width:60%;height:60%}
 h1{font-size:clamp(2.1rem,6vw,3.2rem);line-height:1.1;letter-spacing:-.03em;margin:0;font-weight:700}
-.lede{max-width:35rem;margin:18px auto 0;color:var(--muted);font-size:1.08rem}
-.promise{margin:14px 0 0;color:var(--accent);font-weight:600}
-.pick-label{margin:32px 0 12px;color:var(--muted);font-size:.85rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase}
+.lede{max-width:35rem;margin:12px auto 0;color:var(--muted);font-size:1rem}
+.promise{max-width:36rem;margin:12px auto 0;color:var(--accent);font-weight:600;font-size:.95rem;line-height:1.5}
+.pick-label{margin:18px 0 8px;color:var(--muted);font-size:.8rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase}
 .picker{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;max-width:40rem;margin:0 auto}
-.pick{padding:7px 14px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--ink);font:500 .92rem Inter,system-ui,sans-serif;cursor:pointer}
+.pick{padding:7px 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--ink);font:500 .88rem Inter,system-ui,sans-serif;cursor:pointer}
 .pick:hover{border-color:var(--accent)}
 .pick:focus-visible,.copy:focus-visible,summary:focus-visible,.link:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
-.pick[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .pick[aria-pressed="true"]{color:#0d1419}}
-:root[data-theme="dark"] .pick[aria-pressed="true"]{color:#0d1419}
-.paste-label{margin:26px 0 10px;color:var(--accent);font-weight:600}
-.copy{display:flex;gap:12px;align-items:center;width:100%;max-width:38rem;margin:0 auto;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--ink);font:700 14px/1.45 "JetBrains Mono",monospace;text-align:left;cursor:pointer;transition:border-color .15s}
+.pick[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.paste-label{margin:20px 0 8px;color:var(--accent);font-weight:600}
+.copy,.static-line{display:flex;gap:12px;align-items:center;width:100%;max-width:38rem;margin:0 auto;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--ink);font:600 14px/1.45 "JetBrains Mono",monospace;text-align:left;overflow-wrap:anywhere}
+.copy{cursor:pointer;transition:border-color .15s}
+.static-line{user-select:text}
 .copy:hover{border-color:var(--accent)}
 .copy span{flex:1;word-break:break-word}
 .copy svg{flex:none;width:18px;height:18px;color:var(--accent)}
+.feedback{font-size:.9rem;color:var(--ink);max-width:38rem;margin:8px auto 0}
+.feedback:empty{margin:0}
+.manual-copy{max-width:38rem;margin:12px auto;text-align:left}
+.manual-copy label{font-size:.9rem}
+textarea{display:block;width:100%;min-height:10rem;margin-top:6px;padding:12px;border:1px solid var(--accent);border-radius:10px;background:var(--card);color:var(--ink);font:14px/1.5 monospace;resize:vertical}
 .note{color:var(--muted);font-size:.92rem;margin:12px auto 0;max-width:36rem}
 .chips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:22px}
 .chip{padding:4px 12px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:.85rem;font-weight:600}
 .status{margin:22px auto 0;color:var(--muted);font-size:.92rem;max-width:36rem}
+.status p{margin:8px 0}
+.disclosure{font-size:.82rem;overflow-wrap:anywhere}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--wait);margin-right:7px;vertical-align:1px}
 .dot.online{background:var(--ok)}.dot.offline{background:var(--muted)}
 .link{padding:0;border:0;background:none;color:var(--accent);font:inherit;text-decoration:underline;cursor:pointer}
@@ -62,7 +68,7 @@ h2{font-size:1.5rem;letter-spacing:-.02em;margin:0 0 8px}
 p.sub{color:var(--muted);margin:0 0 24px}
 .steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;padding:0;margin:0;list-style:none;counter-reset:s}
 .steps li{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;counter-increment:s}
-.steps li::before{content:counter(s);display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;font-size:.85rem;margin-bottom:10px}
+.steps li::before{content:counter(s);display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--accent);color:var(--on-accent);font-weight:700;font-size:.85rem;margin-bottom:10px}
 .steps b{display:block;margin-bottom:4px}
 .steps small{color:var(--muted);font-size:.92rem}
 details{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:4px 20px;margin-top:12px}
@@ -70,14 +76,15 @@ summary{cursor:pointer;font-weight:600;padding:14px 0}
 details h3{font-size:1rem;margin:20px 0 6px}
 details li{margin:4px 0}
 table{width:100%;border-collapse:collapse;margin:4px 0 16px;font-size:.94rem}
-th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
 th{color:var(--muted);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
+caption{text-align:left;color:var(--muted);font-size:.9rem;padding:8px 0 12px}
 code{font-family:"JetBrains Mono",monospace;font-size:.88em;background:var(--code);padding:1px 5px;border-radius:5px}
 .notice{color:var(--muted);font-size:.85rem;border-left:3px solid var(--wait);padding:2px 0 2px 12px;margin:32px 0 0}
 footer{padding:28px 0 56px;color:var(--muted);font-size:.9rem;text-align:center}
 footer a{display:inline-block;margin:4px 8px;white-space:nowrap}
 a{color:var(--accent)}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media(max-width:480px){header{padding-top:24px}.mark{width:40px;height:40px;margin-bottom:12px}h1{font-size:1.8rem}.lede{font-size:.94rem;line-height:1.5}.promise{font-size:.9rem}.copy,.static-line{font-size:12px;padding:12px}.pick-label{margin-top:14px}.picker{gap:6px}.pick{padding:7px 10px}.chips{margin-top:18px}section{padding:28px 0}details{padding:4px 12px}th,td{padding:8px 6px}}
 </style>
 </head>
 <body>
@@ -86,71 +93,80 @@ a{color:var(--accent)}
 <header>
   <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><g id="arm"><path d="M12 12V2.8"/><path d="M9.7 4.8 12 7.1l2.3-2.3"/></g><use href="#arm" transform="rotate(60 12 12)"/><use href="#arm" transform="rotate(120 12 12)"/><use href="#arm" transform="rotate(180 12 12)"/><use href="#arm" transform="rotate(240 12 12)"/><use href="#arm" transform="rotate(300 12 12)"/></svg></div>
   <h1>Freeze your agent.<br>Run it in Copilot Studio.</h1>
-  <p class="lede">brainfreeze studio turns your Brainstem or a RAPP Store app into a Copilot Studio agent in your own environment. Logic it can translate becomes real Power Platform flows, each proven against your agent's own Python before anything ships. The rest becomes a skill, and it tells you which.</p>
-  <p class="promise">Proven before it ships. Deployed as you.</p>
-
-  <p class="pick-label" id="ai-label">Which AI do you use?</p>
-  <div class="picker" role="group" aria-labelledby="ai-label" id="ai-picker"></div>
-
-  <p class="pick-label" id="source-label">What are you bringing?</p>
-  <div class="picker" role="group" aria-labelledby="source-label" id="source-picker"></div>
+  <p class="lede">brainfreeze studio brings your RAPP <code>agent.py</code> into your own Copilot Studio environment.</p>
+  <p class="promise" id="coverage-promise">Agents with a proven translation become tools; the rest become skills, and the build says why.</p>
 
   <p class="paste-label" id="paste-label">Paste this into GitHub Copilot</p>
-  <button class="copy" id="copy" type="button" aria-label="Copy this line">
-    <span id="prompt">Open https://kody-w.github.io/rapp-brainfreeze-studio/ and try brainfreeze studio with its Invoice Router sample. Own the complete setup, show me it answering in Copilot Studio, keep it a Draft and leave me only sign-in and consent.</span>
+  <div class="static-line" id="static-line"><span id="prompt">Open https://kody-w.github.io/rapp-brainfreeze-studio/ and try brainfreeze studio with its Invoice Router sample. Plan first; deploy only after my yes and keep it a Draft. If you can drive my signed-in browser, test the agent; otherwise give me the maker link and question to ask.</span></div>
+  <button class="copy" id="copy" type="button" aria-label="Copy this line" hidden>
     <svg id="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+    <svg id="success-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M20 6 9 17l-5-5"/></svg>
   </button>
-  <p class="sr" id="copied" aria-live="polite"></p>
+  <p class="feedback" id="copied" aria-live="polite"></p>
+  <div class="manual-copy" id="manual-copy" hidden><label for="copy-text">Setup line for manual copy</label><textarea id="copy-text" readonly spellcheck="false"></textarea></div>
   <noscript><p class="note">Select the line above and paste it into your AI. It works in GitHub Copilot, Claude Code and any AI agent that can run commands. Your AI can also read the <a href="skills/brainfreeze-studio/SKILL.md">setup skill</a> directly.</p></noscript>
-  <p class="note" id="pick-note">Works in GitHub Copilot CLI and VS Code Agent mode. Copilot installs the tools, builds and proves your agent, and deploys it. You only sign in, pick your environment and say yes.</p>
-
-  <div class="chips"><span class="chip">Your own environment</span><span class="chip">Your own sign-in</span><span class="chip">A Draft until you say publish</span><span class="chip">Flows proven against your Python</span></div>
-  <p class="status" id="status" hidden><span class="dot" id="dot"></span><span id="status-label"></span> <button class="link" type="button" id="probe" hidden>Check this computer</button></p>
+  <div id="customize" hidden>
+    <p class="pick-label" id="ai-label">Your AI · change the default</p>
+    <div class="picker" role="group" aria-labelledby="ai-label" id="ai-picker"></div>
+    <p class="pick-label" id="source-label">What are you bringing?</p>
+    <div class="picker" role="group" aria-labelledby="source-label" id="source-picker"></div>
+    <p class="note" id="pick-note"></p>
+  </div>
+  <p class="note" id="browser-note">An AI that can drive your signed-in browser can ask the test question (for example, Claude in Chrome or Copilot with a browser extension). Otherwise it gives you the maker link and question for you to ask. A link is not a verified reply.</p>
+  <div class="chips" id="proof-chips"><span class="chip">Your own environment</span><span class="chip">Your own sign-in</span><span class="chip">Draft deploy · no publishing</span><span class="chip">Translations: Python or recorded proofs</span><span class="chip">Profiles: reviewed SDK capabilities</span></div>
+  <div class="status" id="status" hidden>
+    <p><span class="dot" id="dot"></span><span id="status-label"></span></p>
+    <button class="link" type="button" id="probe" hidden>Check this computer for a Brainstem</button>
+    <p class="disclosure" id="probe-disclosure">Optional: one GET to <code>http://localhost:7071/health/public</code>; only whether a Brainstem answers and its version; nothing is sent. Setup works without granting access.</p>
+  </div>
 </header>
 
 <section>
   <h2>Your AI does the work.</h2>
-  <p class="sub">You paste one line. Your AI sets everything up, builds and checks your agent, and deploys it. You never run a command yourself.</p>
+  <p class="sub">With an AI that can run commands, you paste one line. It handles setup and the build, then asks before deploying. You handle sign-in, environment choice and approvals.</p>
   <ol class="steps">
     <li><b>Ask for it</b><small>Pick your AI and what you're bringing, then paste the line.</small></li>
-    <li><b>Approve once</b><small>You sign in with the account that has your Copilot Studio environment and pick the environment. Your AI shows you exactly what it will create there, changing nothing, and waits for your yes.</small></li>
-    <li><b>See it answer</b><small>Your AI opens your new agent's test chat in Copilot Studio and gives you a question to ask. If it can use your browser, it asks for you and shows you the reply.</small></li>
+    <li><b>Review the plan</b><small>Sign in and choose your environment. Your AI shows a read-only plan, including removals and effects on an already-published agent. It deploys only after your yes.</small></li>
+    <li id="test-step"><b>Try the test chat</b><small>If your AI can drive your signed-in browser, it asks the question and shows the reply. Otherwise it gives you the maker link and question to ask yourself.</small></li>
   </ol>
+  <p class="note" id="draft-rules">The deploy leaves a Draft and nothing is published. If the agent was already published, flow changes reach it at once; the plan says so first.</p>
 </section>
 
 <section>
-  <h2>Proven before it ships.</h2>
-  <p class="sub">An agent.py doesn't run in Copilot Studio. Wherever your agent has a translation (a proven profile, a spec written for it, or one materialized from its recorded outputs), brainfreeze studio runs that translation beside your agent's real Python on every test case and refuses it if a single answer differs. Every other agent becomes a skill that works from its instructions, and the build tells you which and why.</p>
+  <h2>What actually becomes a tool.</h2>
+  <p class="sub" id="coverage">An <code>agent.py</code> does not run in Copilot Studio. Tools require a matching spec shipped in <code>translations/</code>, proven against Python or recorded proofs, or one of the grail's reviewed <code>copilot-harness-sdk</code> profiles: ManageMemory, ContextMemory or HackerNews. A profile matches the reviewed source's digest, not just its name. Profiles are reviewed SDK capabilities, not re-proven against your file. Everything else becomes a reasoning-only skill; the build explains why.</p>
   <details>
     <summary>More: what your agent becomes</summary>
-    <table>
-      <thead><tr><th>What the agent does</th><th>With a translation, in Copilot Studio</th></tr></thead>
+    <table id="conversion-table">
+      <caption>If a requirement is missing, the fallback is a reasoning-only skill: instructions and source as reference, not executed Python.</caption>
+      <thead><tr><th>Example</th><th>Requires</th><th>In Copilot Studio</th></tr></thead>
       <tbody>
-        <tr><td>Rules or math</td><td>An agent flow</td></tr>
-        <tr><td>Stored data</td><td>Dataverse tools</td></tr>
-        <tr><td>Calls an HTTP API</td><td>A custom connector, whose code can make the calls</td></tr>
-        <tr><td>Keeps state between calls</td><td>Connector code that keeps each file as a Dataverse note</td></tr>
-        <tr><td>Reads your files</td><td>Connector code that reads them from a SharePoint folder</td></tr>
-        <tr><td>Only reasons or writes</td><td>A skill</td></tr>
-        <tr><td>A RAPP Store app's screen</td><td>A Power Apps code app (optional)</td></tr>
-        <tr><td>Anything without a translation yet</td><td>A skill that works from the agent's instructions, and never claims its code ran</td></tr>
+        <tr><td>InvoiceRouter: rules</td><td>Matching shipped translation spec</td><td>An agent flow</td></tr>
+        <tr><td>JsonDoctor: files</td><td>Matching shipped translation spec and its C# port</td><td>Connector code; file reads use a SharePoint folder</td></tr>
+        <tr><td>Thoughtbox: state</td><td>Matching shipped translation spec and its C# port</td><td>Connector code; files kept as Dataverse notes</td></tr>
+        <tr><td>ForumAgent: HTTP</td><td>Matching shipped translation spec and its C# port</td><td>A custom connector that makes the calls</td></tr>
+        <tr><td>ManageMemory / ContextMemory</td><td>SDK profile, reviewed source digest and a Dataverse environment</td><td>Dataverse memory tools and skills</td></tr>
+        <tr><td>HackerNews</td><td>SDK profile, reviewed source digest and a provisioned connector</td><td>A connector and agent flow</td></tr>
+        <tr><td>Your other <code>agent.py</code></td><td>No matching spec or reviewed profile</td><td>A reasoning-only skill; the build says why</td></tr>
       </tbody>
     </table>
+    <p id="translation-authoring">Writing new translations with <code>materialize</code> or C# ports is separate work; this setup does not do it. A RAPP Store listing alone does not supply a translation. An optional Power Apps screen is also outside this setup.</p>
   </details>
   <details>
     <summary>More: how it's checked</summary>
     <ul>
-      <li><b>Before deploying:</b> each translation runs beside the agent's real Python on every test case. The build prints a parity line per agent, such as <code>InvoiceRouter 72/72 PROVEN</code>, and refuses a translation with a single difference.</li>
-      <li><b>Before deploying:</b> your AI runs the deploy as a plan first. It reads your environment, changes nothing, and shows you what it would create, update or remove.</li>
-      <li><b>While deploying:</b> every component is read back from your environment and checked against what was built.</li>
-      <li><b>After deploying:</b> it's a Draft until you ask your AI to publish it. Its test chat shows the real answers.</li>
-      <li><b>As you:</b> the deploy uses your own delegated sign-in. It refuses app-only tokens and needs no service account.</li>
+      <li><b>Translation proofs:</b> matching specs are checked against the agent's Python or recorded proofs. The build reports results such as <code>InvoiceRouter 72/72 PROVEN</code>; a failed proof stops the build. This is not a new Python proof for a reviewed SDK profile.</li>
+      <li id="proof-safety"><b>Trust the source:</b> proving a translation runs the agent's Python on your computer, in a separate process with a clean environment and a temporary home and working folder. This is not a sandbox: build only code you trust.</li>
+      <li id="plan-rules"><b>Before deploying:</b> your AI shows a read-only plan (<code>--plan</code>): create or update, which components would be removed, whether the agent was already published, and which connection each flow uses. It deploys only after you say yes.</li>
+      <li id="deploy-rules"><b>While deploying:</b> a digest checks it is exactly the build that was planned. Pass the plan's printed <code>digest:</code> value as <code>--expect &lt;digest&gt;</code>; do not rebuild in between. The deploy reads back the components, their content, the flows and their links and bindings, and stops on any difference.</li>
+      <li id="identity-rules"><b>As you:</b> it uses your own delegated sign-in; app-only tokens are refused. It uses your own connections, never someone else's unless you explicitly allow it.</li>
+      <li id="redeploy-rules"><b>Redeploying:</b> it removes components not in the build, including ones added by hand in Copilot Studio. The plan lists them first; <code>--keep-extra</code> keeps them.</li>
     </ul>
     <p><a href="https://github.com/kody-w/rapp-brainfreeze-studio/blob/main/MAPPING.md">How every RAPP concept maps to Copilot Studio</a>, with a status and evidence per row · Rather do it by hand? <a href="https://github.com/kody-w/rapp-brainfreeze-studio#use-it">Every command is in the README</a>.</p>
   </details>
   <details>
     <summary>For AI agents reading this page</summary>
-    <p>The person wants their agent in Copilot Studio. Before running anything, tell them in a few lines what you will install, then wait for their yes. They sign in themselves with the Azure CLI; never use a service account or anyone else's token. Before deploying, run the deploy with <code>--plan</code> (it changes nothing), show them what it would create, update or remove, and wait for their yes. Deploy as a Draft (<code>--draft</code>), show the agent answering in Copilot Studio's test chat, and publish only when they ask.</p>
+    <p id="ai-instructions">Before running anything, explain what you will install and wait for consent. The person signs in with the Azure CLI. For every source (Brainstem, RAPP Store or sample), build once. Run <code>python3 -m brainfreeze_studio deploy &lt;build&gt;/workspace --environment &lt;environment&gt; --draft --plan</code> for the read-only plan; show removals, existing publication and flow connections before asking for approval. After approval, run the same command with <code>--expect &lt;digest&gt;</code> instead of <code>--plan</code>, using the plan's printed <code>digest:</code> value. Do not rebuild in between. The deploy leaves a Draft; never publish as part of setup. If you can drive the person's signed-in browser, ask the test question and show the actual reply. Otherwise give them the maker link and question to ask; do not claim the reply was verified.</p>
     <h3>GitHub Copilot, Claude Code, and any AI agent that can run commands</h3>
     <p>Follow the <a href="skills/brainfreeze-studio/SKILL.md">setup skill</a>. Also read: the <a href="brainfreeze-studio.json">setup contract</a> (machine-readable), <a href="llms.txt">llms.txt</a>, and, in Claude Code, <a href="CLAUDE.md">CLAUDE.md</a>.</p>
   </details>
@@ -166,12 +182,12 @@ a{color:var(--accent)}
 </footer>
 
 <script type="application/json" id="brainfreeze-studio-discovery">
-{"schema":"brainfreeze-studio-setup/1","manifest":"https://kody-w.github.io/rapp-brainfreeze-studio/brainfreeze-studio.json","skill":"https://kody-w.github.io/rapp-brainfreeze-studio/skills/brainfreeze-studio/SKILL.md","product":"brainfreeze studio","golden_path":"github-copilot","compatibility":["claude-code","any AI agent that can run commands"]}
+{"schema":"brainfreeze-studio-setup/3","manifest":"https://kody-w.github.io/rapp-brainfreeze-studio/brainfreeze-studio.json","skill":"https://kody-w.github.io/rapp-brainfreeze-studio/skills/brainfreeze-studio/SKILL.md","product":"brainfreeze studio","golden_path":"github-copilot","compatibility":["claude-code","any AI agent that can run commands"]}
 </script>
 <script>
 (() => {
   const SITE = "https://kody-w.github.io/rapp-brainfreeze-studio/";
-  const TAIL = "Own the complete setup, show me it answering in Copilot Studio, keep it a Draft and leave me only sign-in and consent.";
+  const TAIL = "Plan first; deploy only after my yes and keep it a Draft. If you can drive my signed-in browser, test the agent; otherwise give me the maker link and question to ask.";
   const README = "https://github.com/kody-w/rapp-brainfreeze-studio#use-it";
   const sources = [
     { id: "brainstem", label: "My Brainstem", ask: "put my Brainstem in Copilot Studio with brainfreeze studio" },
@@ -180,23 +196,36 @@ a{color:var(--accent)}
   ];
   const ais = [
     { id: "copilot", label: "GitHub Copilot", where: "GitHub Copilot",
-      note: "Works in GitHub Copilot CLI and VS Code Agent mode. Copilot installs the tools, builds and proves your agent, and deploys it. You only sign in, pick your environment and say yes." },
+      note: "Copilot CLI or VS Code Agent mode runs the setup. You handle sign-in, environment choice and approvals." },
     { id: "claude", label: "Claude Code", where: "Claude Code",
-      note: "Claude Code follows the same setup skill. With Claude in Chrome it can also ask your new agent a question in Copilot Studio's test chat for you." },
+      note: "Claude Code follows the same setup skill. You handle sign-in, environment choice and approvals." },
     { id: "other", label: "Another AI", where: "your AI agent",
       note: "Any AI agent that can run commands on your computer: it reads the setup skill, tells you what it will do and waits for your yes." },
     { id: "hand", label: "By hand", hand: true,
-      note: "The README has every command: build, prove and deploy, with your own Azure CLI sign-in." },
+      note: "Open the README for the commands, using your own Azure CLI sign-in. Review the plan before deploying." },
   ];
   const promptEl = document.getElementById("prompt");
   const labelEl = document.getElementById("paste-label");
   const noteEl = document.getElementById("pick-note");
   const state = { ai: ais[0], source: sources[2], chosenSource: false };
+  const copyButton = document.getElementById("copy");
+  const icon = document.getElementById("icon");
+  const successIcon = document.getElementById("success-icon");
+  const feedback = document.getElementById("copied");
+  const manual = document.getElementById("manual-copy");
+  const copyText = document.getElementById("copy-text");
+  let feedbackTimer, copyAttempt = 0;
+
+  function copiedIcon(copied) {
+    icon.toggleAttribute("hidden", copied);
+    successIcon.toggleAttribute("hidden", !copied);
+  }
 
   function render() {
+    ++copyAttempt; clearTimeout(feedbackTimer); copiedIcon(false);
+    feedback.textContent = ""; manual.hidden = true;
     document.querySelectorAll("#ai-picker .pick").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.id === state.ai.id)));
     document.querySelectorAll("#source-picker .pick").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.id === state.source.id)));
-    document.getElementById("source-picker").hidden = document.getElementById("source-label").hidden = !!state.ai.hand;
     if (state.ai.hand) {
       promptEl.textContent = README;
       labelEl.textContent = "Rather do it yourself? Open the README";
@@ -204,7 +233,7 @@ a{color:var(--accent)}
       promptEl.textContent = `Open ${SITE} and ${state.source.ask}. ${TAIL}`;
       labelEl.textContent = `Paste this into ${state.ai.where}`;
     }
-    noteEl.textContent = state.ai.note;
+    noteEl.textContent = state.ai.note + (state.ai.hand ? ` Source: ${state.source.label}.` : "");
     try { localStorage.setItem("brainfreeze-ai", state.ai.id); if (state.chosenSource) localStorage.setItem("brainfreeze-source", state.source.id); } catch {}
   }
   function pills(host, options, pick) {
@@ -224,67 +253,80 @@ a{color:var(--accent)}
   } catch {}
   render();
 
-  const icon = document.getElementById("icon");
-  document.getElementById("copy").addEventListener("click", async () => {
+  copyButton.addEventListener("click", async () => {
+    const attempt = ++copyAttempt;
+    clearTimeout(feedbackTimer); copiedIcon(false); feedback.textContent = ""; manual.hidden = true;
     const text = promptEl.textContent.trim();
-    try { await navigator.clipboard.writeText(text); } catch {
-      const r = document.createRange(); r.selectNodeContents(promptEl);
-      const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand("copy");
+    let copied = false;
+    try { await navigator.clipboard.writeText(text); copied = true; } catch {
+      if (attempt !== copyAttempt) return;
+      copyText.value = text; manual.hidden = false; copyText.focus(); copyText.select();
+      try { copied = document.execCommand("copy") === true; } catch {}
     }
-    document.getElementById("copied").textContent = "Copied.";
-    const old = icon.innerHTML; icon.innerHTML = '<path d="M20 6 9 17l-5-5"/>';
-    setTimeout(() => { icon.innerHTML = old; document.getElementById("copied").textContent = ""; }, 1500);
+    if (attempt !== copyAttempt) return;
+    if (!copied) {
+      feedback.textContent = "Couldn't copy automatically. The line is selected; press ⌘C or Ctrl+C.";
+      return;
+    }
+    if (document.activeElement === copyText) copyButton.focus({ preventScroll: true });
+    manual.hidden = true; feedback.textContent = "Copied."; copiedIcon(true);
+    feedbackTimer = setTimeout(() => { copiedIcon(false); feedback.textContent = ""; }, 1500);
   });
+  copyButton.prepend(promptEl);
+  document.getElementById("static-line").hidden = true;
+  copyButton.hidden = document.getElementById("customize").hidden = false;
 
-  // The Brainstem answers on localhost. Chrome 142+ and Edge 143+ ask before a website may reach apps on this
-  // computer (Local Network Access), so probe on load only when that's already allowed or the browser doesn't ask;
-  // otherwise say what the check does and let the visitor start it.
+  // Unknown permission names are not consent. Only a confirmed grant permits an automatic loopback request.
   const statusEl = document.getElementById("status");
   const dot = document.getElementById("dot");
   const label = document.getElementById("status-label");
   const probeButton = document.getElementById("probe");
   async function localAccess() {
-    if (!navigator.permissions || !navigator.permissions.query) return "unasked";
+    if (!navigator.permissions || !navigator.permissions.query) return "prompt";
     const states = [];
     for (const name of ["local-network-access", "loopback-network", "local-network"]) {
       try { states.push((await navigator.permissions.query({ name })).state); } catch {}
     }
-    if (states.includes("granted")) return "granted";
     if (states.includes("denied")) return "denied";
-    return states.length ? "prompt" : "unasked";
+    return states.includes("granted") ? "granted" : "prompt";
   }
-  function timeout(ms) {
-    if (AbortSignal.timeout) return AbortSignal.timeout(ms);
-    const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal;
+  function denied() {
+    dot.className = "dot offline"; probeButton.hidden = true;
+    label.textContent = "Your browser blocked the check; setup still works, tell your AI to use your Brainstem.";
   }
   async function probe() {
     probeButton.hidden = true;
     dot.className = "dot";
-    label.textContent = "Checking for a Brainstem on this computer…";
+    label.textContent = "Waiting for your browser, or for a Brainstem to answer… Setup still works while you wait.";
     try {
-      const response = await fetch("http://localhost:7071/health/public", { signal: timeout(2500) });
+      const response = await fetch("http://localhost:7071/health/public", {
+        method: "GET", credentials: "omit", cache: "no-store", redirect: "error", referrerPolicy: "no-referrer"
+      });
       const data = await response.json();
-      if (data.status === "ok") {
+      if (response.ok && data.status === "ok") {
         dot.className = "dot online";
-        label.textContent = `Your Brainstem is running on this computer (v${data.version}). Bring it: pick "My Brainstem".`;
+        const version = ["string", "number"].includes(typeof data.version) ? `v${data.version}` : "version not reported";
+        label.textContent = `Brainstem found at localhost:7071 (${version}). Choose "My Brainstem" to use it.`;
         if (!state.chosenSource) { state.source = sources[0]; render(); }
         return;
       }
     } catch {}
+    if (await localAccess() === "denied") return denied();
     dot.className = "dot offline";
-    label.innerHTML = 'No Brainstem running on this computer. Try the sample, or <a href="https://kody-w.github.io/rapp-brainstem/">get your Brainstem</a> first.';
+    label.textContent = "Nothing answered at localhost:7071 (it may not be running, or your browser blocked the check).";
+    probeButton.hidden = false;
   }
   probeButton.addEventListener("click", probe);
   (async () => {
     const access = await localAccess();
     statusEl.hidden = false;
-    if (access === "granted" || access === "unasked") return probe();
+    if (access === "granted") return probe();
     dot.className = "dot offline";
     if (access === "denied") {
-      label.textContent = 'Your browser keeps this page from checking for a Brainstem on this computer. Have one? Pick "My Brainstem".';
+      denied();
       return;
     }
-    label.textContent = "Have a Brainstem running on this computer? Your browser will ask before this page can look.";
+    label.textContent = "Have a local Brainstem? You can check; your browser may ask for permission.";
     probeButton.hidden = false;
   })();
 })();
