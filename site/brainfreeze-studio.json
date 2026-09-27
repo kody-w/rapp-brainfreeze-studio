@@ -75,7 +75,7 @@
   },
   "verify": [
     "the build's parity lines: each translated agent matches its Python on every test case, or is refused and stays a skill",
-    "the plan (--plan): what the deploy would create, update or remove, whether the agent is already published, and the build's digest, read without changing anything",
+    "the plan (--plan): what the deploy would create, update or remove, whether the agent is already published, which connection each flow uses, and the build's digest, read without changing anything",
     "the deploy (--expect <digest>): exactly the build that was planned",
     "the deploy's read-back: the components and their content, the flows, their links and their connections, stopping on any difference",
     "a reply in Copilot Studio's test chat, opened from the deploy's maker: link"
@@ -96,7 +96,7 @@
     "rebuild between the plan and the deploy",
     "update an agent the person didn't make with brainfreeze studio: choose a new --name",
     "remove what the person wants to keep: add --keep-extra to the plan and the deploy",
-    "use a service account, a client secret, an app-only token or someone else's connection",
+    "use a service account, a client secret, an app-only token or someone else's connection (--use-shared-connection)",
     "delete or change agents, flows, connections or data beyond what the plan lists, or change environment settings",
     "print, paste or save a token"
   ]

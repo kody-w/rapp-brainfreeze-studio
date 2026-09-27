@@ -172,7 +172,13 @@ sample: `parity:       InvoiceRouter 72/72 PROVEN`.
 ## 4. Show the plan and get the yes
 
 Plan the build you just made. The plan signs in and reads the environment, changes nothing, and prints what the
-deploy would do, ending with `nothing was changed`.
+deploy would do, ending with `plan only:   nothing was changed`:
+- `digest:` identifies this exact build;
+- `plan:` says `create`, `update` (naming the agent that already has this schema name), `unchanged` or `refuse`;
+- `status:` says whether the agent is new, an unpublished Draft, or already published;
+- `remove:` lists what an update would remove (or `none`);
+- one `connection:` line per connection its flows use: `your connection`, or `existing binding` (this agent's own,
+  from an earlier deploy).
 
 **Their Brainstem:**
 
@@ -196,7 +202,7 @@ Tell them, in a few lines:
 - the environment's name and kind, and the agent's name and schema name;
 - whether the plan creates a new agent or updates an existing one, anything it would remove, and whether the agent
   is already published;
-- which connection each flow uses: theirs, or one it would make with their sign-in;
+- which connection each flow uses (the `connection:` lines);
 - what became a flow (with its parity line) and what stayed a skill, with the build's reason;
 - that it's a Draft under their account and nothing is published.
 
@@ -275,7 +281,7 @@ then deploy.
 - `the build changed since the plan`: something rebuilt it after the plan. Plan again and show them the new plan.
 - `an app-only token`: sign in as the person with `az login`, never with a service principal.
 - `no connection for ...`: a flow needs a connection the person doesn't have. They create it in Power Apps
-  (Connections) as themselves; then plan again. Never borrow someone else's.
+  (Connections) as themselves; then plan again. Never borrow someone else's (don't use `--use-shared-connection`).
 - `the live bot is not the harness agent this workspace describes`, or any other error: stop and report it as printed.
   Don't retry around it.
 
