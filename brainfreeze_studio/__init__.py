@@ -45,7 +45,9 @@ PROFILES = {
     "memory-recall": {"match": re.compile(r"^contextmemory$", re.I), "needs": "environment",
                        "sha256": {"83563b7836cd6c79c78eb70369ccbf0ad7eba02d6adc562b1e9dc41a77617769"}},
 }
-MAX_DISPLAY_NAME = 42          # longer names never finish provisioning (copilot-harness-sdk)
+# Copilot Studio flags a longer agent name ("Agent name must be 30 characters or fewer") and won't save the agent
+# from its editor; names over 42 never finish provisioning at all (copilot-harness-sdk).
+MAX_DISPLAY_NAME = 30
 
 
 class StudioBuildError(RuntimeError):
@@ -417,7 +419,8 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
     ({"site", "folder"}) is where agents that read files find them (a SharePoint site and folder). With run_proofs
     off, no agent code runs: only connector-code ports with a proof recorded for their exact bytes are laid."""
     if not name or len(name) > MAX_DISPLAY_NAME:
-        raise StudioBuildError(f"name must be 1-{MAX_DISPLAY_NAME} characters (longer names never finish provisioning)")
+        raise StudioBuildError(f"name must be 1-{MAX_DISPLAY_NAME} characters (Copilot Studio's limit for an agent name); "
+                              f"{name!r} has {len(name or '')}")
     if not re.fullmatch(r"[a-z][a-z0-9]{1,7}", publisher_prefix or ""):
         raise StudioBuildError("publisher prefix: 2-8 lowercase letters/digits, starting with a letter (e.g. rapp)")
     schema_name = schema_name or f"{publisher_prefix}_{re.sub(r'[^A-Za-z0-9]', '', name)}"
