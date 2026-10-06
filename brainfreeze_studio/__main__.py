@@ -54,6 +54,18 @@ def parser():
                     "build's, else the environment's RAPP Files Site, else your tenant's root site)")
     dp.add_argument("--files-folder", help="the folder in that site their paths start from (default /Shared Documents)")
     dp.add_argument("--json", action="store_true", help="print the result as JSON")
+    fc = sub.add_parser("from-catalog", help="a catalog egg URL → gauntlet → build → plan → deploy → live proof, "
+                                             "stopping at the first red step")
+    fc.add_argument("egg", help="https URL of a rapp/1 organism egg (for example one in kody-w/RAR)")
+    fc.add_argument("--environment", required=True, help="https://<org>.crm.dynamics.com/")
+    fc.add_argument("--name", help="display name (default: from the egg's rappid)")
+    fc.add_argument("--publisher-prefix", default="rapp")
+    fc.add_argument("--translations", help="folder of translation specs: agents that prove parity become flows")
+    fc.add_argument("--out", default="from-catalog", help="working folder (gauntlet report, build, logs)")
+    cc = sub.add_parser("catalog-check", help="run the gauntlet over a catalog and write one status file (nightly)")
+    cc.add_argument("eggs", nargs="*", help="egg URLs (default: every egg in kody-w/RAR)")
+    cc.add_argument("--out", default="catalog-status.json")
+
     en = sub.add_parser("environments", help="the Power Platform environments your Azure CLI sign-in (az login) can "
                         "reach, from the Global Discovery Service")
     en.add_argument("--json", action="store_true", help="print them as JSON")
@@ -122,6 +134,24 @@ def main(argv=None):
     a = parser().parse_args(argv)
     if a.cmd == "environments":
         return _environments(a)
+    if a.cmd in ("from-catalog", "catalog-check"):
+        from .catalog import CatalogError, check_catalog, rar_eggs, ship
+        try:
+            if a.cmd == "catalog-check":
+                st = check_catalog(a.eggs or rar_eggs(), a.out)
+                print(f"{st['green']}/{st['total']} eggs green -> {a.out}")
+                return 0 if st["green"] == st["total"] else 1
+            s = ship(a.egg, a.environment, a.out, name=a.name, publisher_prefix=a.publisher_prefix,
+                     translations=a.translations)
+        except CatalogError as e:
+            print(f"brainfreeze-studio: {e}", file=sys.stderr)
+            return 1
+        print(f"\nlive in Copilot Studio: {s['agent']}  {s['maker']}")
+        proven = [f"{k} {v['passed']}/{v['cases']}" for k, v in s["parity"].items()]
+        print(f"proven equal to the Python: {', '.join(proven) or 'none (no translation specs)'}")
+        if s["skills"]:
+            print(f"reasoning skills, not proven: {', '.join(s['skills'])}")
+        return 0
     if a.cmd == "deploy":
         return _deploy(a)
     if a.cmd == "managed-app":

@@ -296,6 +296,25 @@ egg's code there, need a list of the tenants it serves. A job can also deploy a 
 (`{rapplication: "@publisher/id"}`): its agent, the flows its app calls and its code app, published with the
 user's own Power Apps token.
 
+## From a catalog egg, in one command
+
+```bash
+python3 -m brainfreeze_studio from-catalog https://raw.githubusercontent.com/kody-w/RAR/main/stacks/neighborhood-starter/neighborhood-starter.egg \
+  --environment https://<org>.crm.dynamics.com/
+python3 -m brainfreeze_studio catalog-check --out catalog-status.json     # the gauntlet over every egg in kody-w/RAR
+```
+
+`from-catalog` runs a **gauntlet** first, beside your own brainstem and never inside it: fetch over https, verify
+the rapp/1 organism egg, hatch it in a throwaway brainstem (kody-w/rapp-brainfreeze), require every agent to load
+with none quarantined, and ask it what it can do. Only a green gauntlet goes on to build, plan, deploy exactly the
+planned workspace, and a live `/3p` proof (with `ENTRA_CLIENT_ID`/`ENTRA_TENANT_ID` for the proof app). Agents
+with a translation spec (`--translations`) must prove parity first; every other agent is deployed as a reasoning
+skill, and the summary lists them as not proven. `catalog-check` is the gauntlet alone over a catalog, for a
+nightly job.
+
+Live (6 Oct 2026): both RAR stack eggs green; `neighborhood-starter` went from its URL to `rapp_NeighborhoodStarter`
+in kodyv8 in 2 min 44 s, live proof passed (10 agents as reasoning skills, none translated).
+
 ## How close is it?
 
 [MAPPING.md](MAPPING.md) maps every brainstem, agent.py, rapplication and managed-app concept to its Copilot Studio
