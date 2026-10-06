@@ -111,6 +111,23 @@ class BuildTests(unittest.TestCase):
         self.assertIn("failed parity", r["agents"][0]["note"])
         self.assertFalse(any("InvoiceRouterFlow" in f for f in r["files"]))
 
+    def test_a_report_beside_the_spec_never_stands_in_for_it(self):
+        # A materialize report also names its agent; it once replaced the real spec and crashed the build.
+        mixed = TMP / "mixed-translations"
+        mixed.mkdir(exist_ok=True)
+        (mixed / "invoice_router.json").write_text(json.dumps(SPEC))
+        (mixed / "invoice_router.report.json").write_text(json.dumps({"agent": SPEC["agent"], "materialized": True}))
+        r = bs.build(egg(), TMP / "b4", "Invoice Desk", "rapp", translations=mixed)
+        self.assertEqual(r["live"], ["InvoiceRouter"])
+
+    def test_two_specs_for_one_agent_are_refused(self):
+        twice = TMP / "twice-translations"
+        twice.mkdir(exist_ok=True)
+        (twice / "a.json").write_text(json.dumps(SPEC))
+        (twice / "b.json").write_text(json.dumps(SPEC))
+        with self.assertRaises(bs.StudioBuildError):
+            bs.build(egg(), TMP / "b5", "Invoice Desk", "rapp", translations=twice)
+
     @unittest.skipUnless(shutil.which("node") and Path(bs.__file__).exists(), "needs node")
     def test_the_sdk_reads_the_flow_tool(self):
         import os

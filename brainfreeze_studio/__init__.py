@@ -26,6 +26,7 @@ Standard library only.
 import ast
 import hashlib
 import json
+import sys
 import re
 import urllib.request
 from pathlib import Path
@@ -503,6 +504,14 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
             if f.name.endswith(".proof.json"):             # a recorded proof, read beside its spec
                 continue
             spec = json.loads(f.read_text())
+            if not isinstance(spec, dict) or not spec.get("agent") or not (spec.get("flow_name") or spec.get("mode")):
+                # Not a translation spec (a materialize report, notes...): it must never stand in for one.
+                print(f"brainfreeze-studio: skipped {f.name} in the translations folder: not a translation spec",
+                      file=sys.stderr)
+                continue
+            if spec["agent"] in specs:
+                raise StudioBuildError(f"two translation specs claim {spec['agent']}: {specs[spec['agent']]['_file']} "
+                                       f"and {f.name}; keep one")
             spec["_dir"], spec["_file"] = str(f.parent), f.name
             specs[spec["agent"]] = spec
             if spec.get("class"):
