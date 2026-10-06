@@ -1,0 +1,77 @@
+{
+ "agent_file": "ask_hr_agent.py",
+ "source_sha256": "df904e6e967bf39fc08270cf335499c9ceb62f82e4ce9e0380bb906a519f4d50",
+ "operations": {
+  "submit_time_off": {
+   "why": "the preview prints the requested days and the projected balance (vacation minus days) in Python's :g format; the flow computes both and prints them with formatNumber(\u2026, 'g6'). A missing or non-numeric days value previews the 5-day default, as the Python does.",
+   "constants": {
+    "HRVacation": {
+     "jordan": 15.5,
+     "michael": 10.0,
+     "sarah": 22.0,
+     "\u27e8?\u27e9": 15.5
+    }
+   },
+   "derived": [
+    [
+     "HR_DaysValid",
+     "isFloat(coalesce(triggerBody()?['days'], ''))"
+    ],
+    [
+     "HR_Days",
+     "float(if(outputs('HR_DaysValid'), triggerBody()?['days'], '5'))"
+    ]
+   ],
+   "computed": {
+    "name": "time_off_days",
+    "expr": "if(outputs('HR_DaysValid'), 'given', 'default')",
+    "examples": {
+     "default": {},
+     "given": {
+      "days": 7.3125
+     }
+    },
+    "markers": {
+     "given": {
+      "days": 2.5625
+     }
+    }
+   },
+   "fills": [
+    {
+     "token": "ZQHRDAYSQZ",
+     "expr": "formatNumber(outputs('HR_Days'), 'g6')"
+    },
+    {
+     "token": "ZQHRBALANCEQZ",
+     "expr": "formatNumber(sub(outputs('Const_HRVacation')?[outputs('State_employee_name')], outputs('HR_Days')), 'g6')"
+    }
+   ],
+   "probes": {
+    "days": [
+     null,
+     0,
+     0.5,
+     1,
+     2,
+     2.5,
+     3,
+     4.75,
+     5,
+     7.25,
+     10,
+     12.5,
+     15.5,
+     20,
+     22,
+     30,
+     100,
+     365,
+     3650,
+     -2,
+     1e-05
+    ]
+   }
+  }
+ }
+}

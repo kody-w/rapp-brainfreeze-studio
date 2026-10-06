@@ -1133,6 +1133,25 @@ def _sub(out, keyed, states, args):
     return out
 
 
+HAND_DIR = Path(__file__).resolve().parent.parent / "translations" / "hand"
+
+
+def hand_translation_for(source_sha):
+    """The hand translation written for exactly this agent source (its SHA-256), from translations/hand in this
+    repository or any folder in BFS_HAND_DIRS (os.pathsep-separated); None when there is none. Operations an agent
+    computes from numbers (days, income, ...) are blocked without one, so a matching translation is always used."""
+    dirs = [Path(d).expanduser() for d in (os.environ.get("BFS_HAND_DIRS") or "").split(os.pathsep) if d] + [HAND_DIR]
+    for d in dirs:
+        for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+            try:
+                h = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(h, dict) and h.get("source_sha256") == source_sha and h.get("operations"):
+                return h
+    return None
+
+
 def materialize(agent_file, basic_file, *, class_name="", flow_name=None, component=None, python=None,
                 check_clock=True, check_order=True, samples=600, allow_hash_variation=False, hand=None,
                 env=None, data=None, values=None, timeout=600):
@@ -1145,7 +1164,7 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
     agent_file = Path(agent_file)
     source = agent_file.read_text(encoding="utf-8")
     source_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    hand = hand or {}
+    hand = hand if hand is not None else (hand_translation_for(source_sha) or {})
     if hand.get("source_sha256") and hand["source_sha256"] != source_sha:
         raise MaterializeError(f"{agent_file.name}: its hand translation was written for a different source "
                                f"({hand['source_sha256'][:12]}, now {source_sha[:12]})")
