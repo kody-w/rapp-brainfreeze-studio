@@ -213,3 +213,23 @@ class NameLimitTests(unittest.TestCase):
         self.assertIn("30 characters", str(e.exception))
         r = bs.build(egg(), TMP / "ok-name", "Inspection RFP Copilot", "rapp")
         self.assertEqual(r["schema_name"], "rapp_InspectionRFPCopilot")
+
+
+class DeployKeepsChannelsTests(unittest.TestCase):
+    def test_a_redeploy_keeps_the_agents_channels(self):
+        import json as _json
+        from brainfreeze_studio import deploy
+        settings = {"instructions": "Be helpful.", "authenticationMode": "Integrated", "authenticationTrigger": "Always",
+                    "accessControlPolicy": "GroupMembership"}
+        live = deploy.bot_configuration(settings)
+        live["channels"] = [{"$kind": "ChannelDefinition", "channelId": "MsTeams"},
+                            {"$kind": "ChannelDefinition", "channelId": "Microsoft365Copilot"}]
+
+        class Dv:
+            def value(self, path):
+                return [{"botid": "b", "template": "cliagent-1.0.0", "configuration": _json.dumps(live),
+                         "name": "Desk", "publishedon": None}]
+        bot, fields, operation = deploy._bot_state(Dv(), "rapp_Desk", "Desk", settings)
+        self.assertEqual(operation, "unchanged")
+        self.assertEqual([c["channelId"] for c in _json.loads(fields["configuration"])["channels"]],
+                         ["MsTeams", "Microsoft365Copilot"])

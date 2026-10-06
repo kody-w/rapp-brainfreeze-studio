@@ -280,8 +280,8 @@ def _agent_names(settings, schema_name=None, display_name=None):
     name = display_name or settings["displayName"] or schema
     if not schema or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+", schema):
         raise DeployError(f"schema name {schema!r} must look like <prefix>_<Name>")
-    if len(name) > 42:
-        raise DeployError(f"display name is {len(name)} characters; longer than 42 never finishes provisioning")
+    if len(name) > 30:
+        raise DeployError(f"display name is {len(name)} characters; Copilot Studio allows 30 for an agent name")
     return schema, name
 
 
@@ -618,8 +618,18 @@ def ensure_workflow(dv, wf):
 
 
 def _bot_state(dv, schema_name, display_name, settings):
-    config = json.dumps(bot_configuration(settings))
     rows = dv.value(f"bots?$filter=schemaname eq '{_q(schema_name)}'&$select=botid,template,configuration,name,publishedon")
+    wanted = bot_configuration(settings)
+    if rows:
+        # Channels (Teams and Microsoft 365) are switched on outside the workspace; a redeploy keeps them, it doesn't
+        # silently take the agent out of Microsoft 365.
+        try:
+            channels = json.loads(rows[0].get("configuration") or "{}").get("channels")
+        except ValueError:
+            channels = None
+        if channels:
+            wanted["channels"] = channels
+    config = json.dumps(wanted)
     fields = {"name": display_name, "configuration": config,
               "authenticationmode": AUTH_MODES.get(settings["authenticationMode"], 2),
               "authenticationtrigger": AUTH_TRIGGERS.get(settings["authenticationTrigger"], 1),
