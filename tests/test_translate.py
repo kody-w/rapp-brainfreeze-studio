@@ -204,3 +204,12 @@ class McpFallbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NameLimitTests(unittest.TestCase):
+    def test_names_over_thirty_characters_are_refused(self):
+        with self.assertRaises(bs.StudioBuildError) as e:
+            bs.build(egg(), TMP / "long-name", "Inspection RFP Response Copilot", "rapp")      # 31 characters
+        self.assertIn("30 characters", str(e.exception))
+        r = bs.build(egg(), TMP / "ok-name", "Inspection RFP Copilot", "rapp")
+        self.assertEqual(r["schema_name"], "rapp_InspectionRFPCopilot")
