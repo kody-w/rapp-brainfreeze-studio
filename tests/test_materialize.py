@@ -348,3 +348,21 @@ class RecordedMaterializedProofTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProofEnvironmentPythonTests(unittest.TestCase):
+    """An agent run under another minor version must not import this interpreter's compiled packages."""
+
+    def test_other_python_gets_no_site_packages_from_this_one(self):
+        from brainfreeze_studio.materialize import proof_environment
+        with tempfile.TemporaryDirectory() as work:
+            here = proof_environment(work)["PYTHONPATH"].split(":")
+            other = proof_environment(work, python="/usr/bin/python3-other")["PYTHONPATH"].split(":")
+        self.assertFalse(any(Path(p).name in ("site-packages", "dist-packages") for p in other))
+        self.assertTrue(set(other) <= set(here))
+
+    def test_same_python_keeps_its_path(self):
+        from brainfreeze_studio.materialize import proof_environment, proof_python
+        with tempfile.TemporaryDirectory() as work:
+            self.assertEqual(proof_environment(work)["PYTHONPATH"],
+                             proof_environment(work, python=proof_python())["PYTHONPATH"])

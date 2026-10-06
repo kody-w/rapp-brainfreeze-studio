@@ -363,11 +363,14 @@ def complete_proof(report, scheduled):
                     for k in ("scheduled", "observed", "observed_python", "observed_code")))
 
 
-def proof_environment(work, extra=None, hashseed="0"):
+def proof_environment(work, extra=None, hashseed="0", python=None):
     """Isolate credentials in the environment and the real home/working folder, NOT a sandbox.
 
     The code can still read any file this user can read by absolute path, and use the network.
     Explicit spec/case variables are inputs, never a copy of the operator's environment.
+    `python`: the interpreter that will run. When it is not this one, this interpreter's site-packages stay off
+    PYTHONPATH: compiled packages (lxml, for python-docx) built for one minor version crash another, and the
+    target interpreter finds its own.
     """
     allowed = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
     env = {k: os.environ[k] for k in allowed if k in os.environ}
@@ -380,6 +383,10 @@ def proof_environment(work, extra=None, hashseed="0"):
     paths = [str(Path(p or os.getcwd()).resolve()) for p in paths]
     paths = [p for p in paths if p not in stdlib
              and Path(p).name != f"python{sys.version_info[0]}{sys.version_info[1]}.zip"]
+    if python is not None and proof_python(python) != proof_python():
+        own = site.getsitepackages() + ([usersite] if isinstance(usersite, str) else list(usersite))
+        own = {str(Path(p).resolve()) for p in own}
+        paths = [p for p in paths if p not in own and Path(p).name not in ("site-packages", "dist-packages")]
     work = str(Path(work).resolve())
     env.update(HOME=work, USERPROFILE=work, TMPDIR=work, TMP=work, TEMP=work,
                PYTHONPATH=os.pathsep.join(dict.fromkeys(paths)), PYTHONIOENCODING="utf-8",
@@ -692,7 +699,7 @@ class Runner:
             with tempfile.TemporaryDirectory(prefix="bfs-version-") as work:
                 self._version = subprocess.run([self.python, "-B", "-c", "import platform; print(platform.python_version())"],
                                                capture_output=True, text=True, timeout=60, check=True,
-                                               cwd=work, env=proof_environment(work)).stdout.strip()
+                                               cwd=work, env=proof_environment(work, python=self.python)).stdout.strip()
         return self._version
 
     def _exchange(self, requests, clock=CLOCKS[0], hashseed="0"):
@@ -704,7 +711,7 @@ class Runner:
         with tempfile.TemporaryDirectory(prefix="bfs-materialize-") as work:
             try:
                 proc = run_proof_process(argv, input=payload.encode("utf-8"), timeout=self.timeout,
-                                         env=proof_environment(work, self.env, hashseed), cwd=work)
+                                         env=proof_environment(work, self.env, hashseed, python=self.python), cwd=work)
             except subprocess.TimeoutExpired as e:
                 raise ProofProtocolError(label, "runner timed out", len(requests), len(proof_lines(e.stdout))) from None
             except OSError:
