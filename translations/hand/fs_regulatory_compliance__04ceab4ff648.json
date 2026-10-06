@@ -1,0 +1,143 @@
+{
+ "agent_file": "regulatory_compliance_fs_agent.py",
+ "source_sha256": "04ceab4ff64825b90b083235212a7b24813d30af5a2d7b5bcefa11e530824fc3",
+ "operations": {
+  "certification_tracker": {
+   "why": "window_days sets the look-ahead: the tracker lists certifications expiring within int(window_days) days (90 when omitted or zero) and prints that window; the flow computes the window and counts which of the 8 expiry offsets it covers.",
+   "derived": [
+    [
+     "FS_WinRaw",
+     "float(if(isFloat(coalesce(triggerBody()?['window_days'], '')), triggerBody()?['window_days'], '0'))"
+    ],
+    [
+     "FS_Window",
+     "if(equals(outputs('FS_WinRaw'), 0.0), 90.0, if(less(outputs('FS_WinRaw'), 0.0), sub(0.0, sub(sub(0.0, outputs('FS_WinRaw')), mod(sub(0.0, outputs('FS_WinRaw')), 1.0))), sub(outputs('FS_WinRaw'), mod(outputs('FS_WinRaw'), 1.0))))"
+    ]
+   ],
+   "computed": {
+    "name": "certification_window",
+    "expr": "string(add(add(add(add(add(add(add(if(lessOrEquals(-12.0, outputs('FS_Window')), 1, 0), if(lessOrEquals(-3.0, outputs('FS_Window')), 1, 0)), if(lessOrEquals(24.0, outputs('FS_Window')), 1, 0)), if(lessOrEquals(41.0, outputs('FS_Window')), 1, 0)), if(lessOrEquals(88.0, outputs('FS_Window')), 1, 0)), if(lessOrEquals(150.0, outputs('FS_Window')), 1, 0)), if(lessOrEquals(210.0, outputs('FS_Window')), 1, 0)), if(lessOrEquals(300.0, outputs('FS_Window')), 1, 0)))",
+    "examples": {
+     "0": {
+      "window_days": -13
+     },
+     "1": {
+      "window_days": -12
+     },
+     "2": {
+      "window_days": -3
+     },
+     "3": {
+      "window_days": 24
+     },
+     "4": {
+      "window_days": 41
+     },
+     "5": {
+      "window_days": 88
+     },
+     "6": {
+      "window_days": 150
+     },
+     "7": {
+      "window_days": 210
+     },
+     "8": {
+      "window_days": 300
+     }
+    },
+    "markers": {
+     "0": {
+      "window_days": -14
+     },
+     "1": {
+      "window_days": -11
+     },
+     "2": {
+      "window_days": -2
+     },
+     "3": {
+      "window_days": 25
+     },
+     "4": {
+      "window_days": 42
+     },
+     "5": {
+      "window_days": 89
+     },
+     "6": {
+      "window_days": 151
+     },
+     "7": {
+      "window_days": 211
+     },
+     "8": {
+      "window_days": 301
+     }
+    }
+   },
+   "fills": [
+    {
+     "token": "ZQFSWINDOWQZ",
+     "expr": "formatNumber(outputs('FS_Window'), '0')"
+    }
+   ],
+   "probes": {
+    "window_days": [
+     null,
+     0,
+     0.4,
+     0.5,
+     1,
+     30.7,
+     89.99,
+     90,
+     91,
+     365,
+     1000,
+     100000,
+     -0.5,
+     -1,
+     -5,
+     -5.5,
+     -400,
+     -1000,
+     -13,
+     -12,
+     -11,
+     -4,
+     -3,
+     -2,
+     23,
+     24,
+     25,
+     40,
+     41,
+     42,
+     87,
+     88,
+     89,
+     149,
+     150,
+     151,
+     209,
+     210,
+     211,
+     299,
+     300,
+     301
+    ]
+   },
+   "breakpoints": [
+    -12,
+    -3,
+    24,
+    41,
+    88,
+    150,
+    210,
+    300
+   ]
+  }
+ }
+}
