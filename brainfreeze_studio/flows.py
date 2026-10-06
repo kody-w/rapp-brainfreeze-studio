@@ -229,6 +229,11 @@ FUNCTIONS = {
     "setProperty": lambda obj, key, value: _set_property(obj, key, value),
     "startsWith": lambda text, prefix: _str(text).lower().startswith(_str(prefix).lower()),   # not case-sensitive
     "mod": lambda a, b: math.fmod(a, b) if isinstance(a, float) or isinstance(b, float) else int(math.fmod(a, b)),
+    "split": lambda text, sep: _str(text).split(_str(sep)),
+    "first": lambda v: (v[0] if v else None) if isinstance(v, (list, str)) else None,
+    "last": lambda v: (v[-1] if v else None) if isinstance(v, (list, str)) else None,
+    "length": lambda v: len(v),
+    "range": lambda start, count: list(range(start, start + count)),
 }
 
 
@@ -511,6 +516,38 @@ def compile_materialized(spec, schema_name=None):
         add(f"Fill_{n}", "@" + _fill_expr(source, stage))
         source = f"outputs('Fill_{n}')"
     result = _fill_expr(source, stages[-1])
+    connection_refs, flow_params, response_extra, response_schema = {}, {}, {}, {}
+    if spec.get("documents"):
+        from .materialize import DOC_MARK
+        from .connector_code import FILES_API, files_parameters
+        settings = files_parameters(schema_name or "rapp_agent")
+        site, folder = (f"parameters({_q(settings[k]['parameter'])})" for k in ("site", "folder"))
+        add("Doc_mark", DOC_MARK)
+        add("Final", "@" + result)
+        add("Docs", "@json(if(contains(outputs('Final'), outputs('Doc_mark')), last(split(outputs('Final'), "
+                    "outputs('Doc_mark'))), '{\"data\":[],\"documents\":[]}'))")
+        path = "outputs('Docs')?['documents'][item()]?['path']"
+        name = f"last(split({path}, '/'))"
+        sub = f"if(contains({path}, '/'), concat('/', replace({path}, concat('/', {name}), '')), '')"
+        actions["Save_documents"] = {
+            "type": "Foreach", "runAfter": {prev: ["Succeeded"]},
+            "foreach": "@range(0, length(outputs('Docs')?['documents']))",
+            "actions": {"Create_file": {"type": "OpenApiConnection", "runAfter": {}, "inputs": {
+                "host": {"apiId": f"/providers/Microsoft.PowerApps/apis/{FILES_API}", "connectionName": FILES_API,
+                         "operationId": "CreateFile"},
+                "parameters": {"dataset": f"@{site}", "folderPath": f"@concat({folder}, {sub})", "name": f"@{name}",
+                               "body": "@base64ToBinary(outputs('Docs')?['data'][item()])",
+                               "queryParametersSingleEncoded": True},
+                "authentication": "@parameters('$authentication')"}}}}
+        prev = "Save_documents"
+        result = "first(split(outputs('Final'), outputs('Doc_mark')))"
+        response_extra = {"documents": "@outputs('Docs')?['documents']", "saved_to": f"@concat({site}, {folder})"}
+        response_schema = {"documents": {"type": "array"}, "saved_to": {"type": "string"}}
+        connection_refs[FILES_API] = {"api": {"name": FILES_API}, "runtimeSource": "embedded",
+                                      "connection": {"connectionReferenceLogicalName": f"{schema_name}.{FILES_API}"}}
+        for v in settings.values():
+            flow_params[v["parameter"]] = {"defaultValue": v["defaultValue"], "type": "String",
+                                           "metadata": {"schemaName": v["schemaName"], "description": v["description"]}}
     props = {}
     for name, meta in spec["inputs"].items():
         p_ = {"title": name, "type": "string", "description": meta.get("description", ""), "x-ms-dynamically-added": True}
@@ -519,13 +556,13 @@ def compile_materialized(spec, schema_name=None):
         props[name] = p_
     actions["Respond_to_agent"] = {
         "runAfter": {prev: ["Succeeded"]}, "type": "Response", "kind": "Skills",
-        "inputs": {"statusCode": 200, "body": {"result": "@" + result},
-                   "schema": {"type": "object", "properties": {"result": {"type": "string"}}}}}
-    return {"properties": {"connectionReferences": {}, "definition": {
+        "inputs": {"statusCode": 200, "body": {"result": "@" + result, **response_extra},
+                   "schema": {"type": "object", "properties": {"result": {"type": "string"}, **response_schema}}}}
+    return {"properties": {"connectionReferences": connection_refs, "definition": {
         "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
         "contentVersion": "1.0.0.0",
         "parameters": {"$connections": {"defaultValue": {}, "type": "Object"},
-                       "$authentication": {"defaultValue": {}, "type": "SecureObject"}},
+                       "$authentication": {"defaultValue": {}, "type": "SecureObject"}, **flow_params},
         "triggers": {"manual": {"type": "Request", "kind": "Skills",
                                 "inputs": {"schema": {"type": "object", "properties": props,
                                                       "required": list(spec.get("required", []))}}}},
@@ -649,8 +686,9 @@ def tool_yaml(spec, workflow_id):
             f"toolOutputs:\n{outs}toolInputs:\n{ins}")
 
 
-def run_flow(flow, trigger, parameter_values=None, now=None):
-    """Evaluate a compiled flow.json for one trigger body. Returns the response body."""
+def run_flow(flow, trigger, parameter_values=None, now=None, with_outputs=False):
+    """Evaluate a compiled flow.json for one trigger body. Returns the response body (and the Compose outputs).
+    Connector steps (a Foreach that creates files) are not run offline; what they write is proven from its inputs."""
     d = flow["properties"]["definition"]
     params = {k: v.get("defaultValue") for k, v in d["parameters"].items()}
     params.update(parameter_values or {})
@@ -660,7 +698,8 @@ def run_flow(flow, trigger, parameter_values=None, now=None):
         if action["type"] == "Compose":
             ctx["outputs"][name] = evaluate(action["inputs"], ctx)
         elif action["type"] == "Response":
-            return {k: evaluate(v, ctx) for k, v in action["inputs"]["body"].items()}
+            body = {k: evaluate(v, ctx) for k, v in action["inputs"]["body"].items()}
+            return (body, ctx["outputs"]) if with_outputs else body
     raise StudioBuildError("flow has no Response action")
 
 
@@ -786,7 +825,12 @@ def prove_materialized(spec, agent_file, basic_file, schema_name=None):
             observed += len(answers)
             for vec, py in _zip_exact(vectors, answers):
                 try:
-                    flow_out = _str(run_flow(flow, vec, now=clock).get("result"))
+                    body, outs = run_flow(flow, vec, now=clock, with_outputs=True)
+                    flow_out = _str(body.get("result"))
+                    docs = outs.get("Docs") if spec.get("documents") else None
+                    if docs and docs.get("documents"):
+                        from .materialize import DOC_MARK
+                        flow_out += DOC_MARK + json.dumps(docs, sort_keys=True, separators=(",", ":"))
                 except StudioBuildError as e:
                     flow_out = f"FLOW ERROR: {e}"
                 results.append({"args": vec, "clock": clock, "python": py, "flow": flow_out, "match": py == flow_out})
