@@ -630,9 +630,17 @@ def _dicts():
             continue
         if not all(isinstance(k, str) for k in value):
             continue
+        entries = list(value.items())[:200]
+        # every text field the entries share: a resolver may match on "name", "account", "title", ...
+        shared = None
+        for _k, v in entries:
+            fields = {f for f, x in v.items() if isinstance(x, str)} if isinstance(v, dict) else set()
+            shared = fields if shared is None else shared & fields
         out[name] = {"keys": list(value)[:200],
-                     "names": {k: v.get("name") for k, v in list(value.items())[:200]
-                               if isinstance(v, dict) and isinstance(v.get("name"), str)}}
+                     "names": {k: v.get("name") for k, v in entries
+                               if isinstance(v, dict) and isinstance(v.get("name"), str)},
+                     "fields": {f: {k: v[f] for k, v in entries} for f in sorted(shared or ())
+                                if f != "name"}}
     return out
 
 for line in sys.stdin:
@@ -820,17 +828,33 @@ def _kind(schema):
 
 class _Resolver:
     """The library resolver idiom: empty -> a default key; else q = s.lower().strip() and the first key where
-    ``key in q or q in name.lower()``; else ``miss`` (another key, or None for "unknown")."""
+    ``key in q or q in name.lower()``; else ``miss`` (another key, or None for "unknown").
+    ``ci_key``: the key is compared case-insensitively (keys like "CUST-001" against an upper-cased query).
+    ``two_pass``: every key is tried first, then every name (two loops, not one).
+    ``name_raw``: names are matched against the lower-cased query without stripping its spaces."""
 
-    def __init__(self, order, names, default, miss):
+    def __init__(self, order, names, default, miss, ci_key=False, two_pass=False, name_raw=False):
         self.order, self.names, self.default, self.miss = order, names, default, miss
+        self.ci_key, self.two_pass, self.name_raw = ci_key, two_pass, name_raw
+
+    def _key(self, k):
+        return k.lower() if self.ci_key else k
 
     def __call__(self, raw):
         if raw is None or raw == "":
             return self.default
         q = raw.lower().strip()
+        qn = raw.lower() if self.name_raw else q
+        if self.two_pass:
+            for k in self.order:
+                if self._key(k) in q:
+                    return k
+            for k in self.order:
+                if qn in self.names.get(k, "").lower():
+                    return k
+            return self.miss
         for k in self.order:
-            if k in q or q in self.names.get(k, "").lower():
+            if self._key(k) in q or qn in self.names.get(k, "").lower():
                 return k
         return self.miss
 
@@ -935,8 +959,13 @@ class Discovery:
         for d in self.contract.get("dicts", {}).values():
             if len(d["keys"]) <= 60:
                 dict_words += [k for k in d["keys"] if isinstance(k, str)] + [v for v in d["names"].values() if v]
+                dict_words += [w for v in d["names"].values() if v for w in v.split() if len(w) >= 4]
+                # the other text fields a resolver may match on, and their words, so the check can tell them apart
+                for f in (d.get("fields") or {}).values():
+                    texts = [v for v in f.values() if isinstance(v, str) and 0 < len(v) <= 60]
+                    dict_words += texts + [w for t in texts for w in t.split() if len(w) >= 4]
         probes = list(dict.fromkeys(first[2:] + _variants([v for v in firsts if v.strip()][:40])
-                                    + _variants(dict_words[:40])))
+                                    + _variants(list(dict.fromkeys(dict_words))[:120])))
         self._fill(name, contexts, probes, table)
         recognized = [v for v in probes if any(table[(ci, v)] != table[(ci, s)].replace(s, v) for ci in n)]
         if all(table[(ci, "")] == table[(ci, None)] for ci in n):
@@ -970,27 +999,31 @@ class Discovery:
             order = [k for k in d["keys"] if isinstance(k, str)]
             if not order or len(order) > 60:
                 continue
-            names = {k: (d["names"].get(k) or "") for k in order}
-            self._fill(name, contexts, order + [v for v in names.values() if v], table)
-            for default in order:
-                for miss in [None] + order:
-                    res = _Resolver(order, names, default, miss)
-                    res.rep = {}
-                    for k in order:
-                        for cand in (k, names[k]):
-                            if cand and res(cand) == k:
-                                res.rep[k] = cand
-                                break
-                    if default not in res.rep or (miss is not None and miss not in res.rep):
-                        continue
-                    for absent_is_default in (True, False):
-                        ok, _, fl = self._check(name, contexts, table, probes, "resolver", resolver=res,
-                                                absent_is_default=absent_is_default)
-                        if ok:
-                            info.update(rule="resolver", resolver=res, dict=dname,
-                                        canon=[k for k in order if k in res.rep],
-                                        absent_is_default=absent_is_default, json_echo=fl["json"])
-                            return info
+            choices = [{k: (d["names"].get(k) or "") for k in order}]
+            choices += [{k: (f.get(k) or "") for k in order} for f in (d.get("fields") or {}).values()]
+            variants = [(c, t, n) for n in (False, True) for t in (False, True) for c in (False, True)]
+            for names in choices:
+                self._fill(name, contexts, order + [v for v in names.values() if v], table)
+                for default in order:
+                    for miss in [None] + order:
+                        for ci_key, two_pass, name_raw in variants:
+                            res = _Resolver(order, names, default, miss, ci_key, two_pass, name_raw)
+                            res.rep = {}
+                            for k in order:
+                                for cand in (k, names[k]):
+                                    if cand and res(cand) == k:
+                                        res.rep[k] = cand
+                                        break
+                            if default not in res.rep or (miss is not None and miss not in res.rep):
+                                continue
+                            for absent_is_default in (True, False):
+                                ok, _, fl = self._check(name, contexts, table, probes, "resolver", resolver=res,
+                                                        absent_is_default=absent_is_default)
+                                if ok:
+                                    info.update(rule="resolver", resolver=res, dict=dname,
+                                                canon=[k for k in order if k in res.rep],
+                                                absent_is_default=absent_is_default, json_echo=fl["json"])
+                                    return info
         # canonical mode (approximated): one representative per distinct behavior, from the agent's own values
         if firsts and not all(v.strip() == "" for v in firsts):
             enum = [str(v) for v in (self.props.get(name) or {}).get("enum") or []]
@@ -1343,7 +1376,9 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
         if i["rule"] == "resolver":
             r_ = i["resolver"]
             k["resolver"] = {"order": r_.order, "names": r_.names, "default": r_.default, "miss": r_.miss,
-                             "reachable": sorted(r_.rep), "absent_is_default": i.get("absent_is_default", True)}
+                             "reachable": sorted(r_.rep), "absent_is_default": i.get("absent_is_default", True),
+                             **({"ci_key": True} if r_.ci_key else {}), **({"two_pass": True} if r_.two_pass else {}),
+                             **({"name_raw": True} if r_.name_raw else {})}
         keying.append(k)
     keying += list(hand_keying.values())
     merged = {"constants": {}, "derived": [], "fills": []}
