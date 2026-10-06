@@ -388,10 +388,18 @@ def _state_expr(k):
                                    "have no probe that reaches them")
         miss = _q(r["miss"] if r["miss"] is not None else UNKNOWN)
         q = f"toLower(trim({raw}))"
+        qn = f"toLower({raw})" if r.get("name_raw") else q
+        needle = lambda key: _q(key.lower() if r.get("ci_key") else key)
         chain = miss
-        for key in reversed(r["order"]):
-            name = (r["names"].get(key) or "").lower()
-            chain = f"if(or(contains({q}, {_q(key)}), contains({_q(name)}, {q})), {_q(key)}, {chain})"
+        if r.get("two_pass"):               # every key first, then every name
+            for key in reversed(r["order"]):
+                chain = f"if(contains({_q((r['names'].get(key) or '').lower())}, {qn}), {_q(key)}, {chain})"
+            for key in reversed(r["order"]):
+                chain = f"if(contains({q}, {needle(key)}), {_q(key)}, {chain})"
+        else:
+            for key in reversed(r["order"]):
+                name = (r["names"].get(key) or "").lower()
+                chain = f"if(or(contains({q}, {needle(key)}), contains({_q(name)}, {qn})), {_q(key)}, {chain})"
         absent = _q(r["default"] if r.get("absent_is_default", True) else ABSENT)
         return f"if(equals({raw}, null), {absent}, if(equals({raw}, ''), {_q(r['default'])}, {chain}))"
     if rule == "computed":
