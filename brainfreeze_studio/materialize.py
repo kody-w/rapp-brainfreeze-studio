@@ -489,6 +489,11 @@ _PINNED = json.loads(sys.argv[5]) if len(sys.argv) > 5 else []
 # that reads files, calls the network, calls an LLM or starts processes is refused (and the report says which).
 _EFFECTS = set()
 _OWN = {os.path.realpath(agent_file), os.path.realpath(basic_file)}
+# Documents: each call gets its own RAPP_OUTPUT_DIR. Files the agent writes there are part of its output (returned
+# with the text, so the table and the proof carry their bytes); writing anywhere else is still a refused effect.
+import tempfile as _tempfile, base64 as _b64, hashlib as _hashlib
+_OUTBASE = os.path.realpath(_tempfile.mkdtemp(prefix="rapp-out-"))
+_DOC_MARK = "\n\n\u2063RAPP-DOCUMENTS\u2063"
 
 def _blocked(*a, **k):
     _EFFECTS.add("network")
@@ -511,7 +516,22 @@ def _is_own(path):
         real = os.path.realpath(os.fspath(path))
     except TypeError:
         return True
-    return real in _OWN or any(real == r or real.startswith(r + os.sep) for r in _ROOTS)
+    return (real in _OWN or real == _OUTBASE or real.startswith(_OUTBASE + os.sep)
+            or any(real == r or real.startswith(r + os.sep) for r in _ROOTS))
+
+
+def _collect_documents(folder):
+    docs, data = [], []
+    for root, _dirs, names in sorted(os.walk(folder)):
+        for name in sorted(names):
+            full = os.path.join(root, name)
+            with _real_open(full, "rb") as f:
+                blob = f.read()
+            docs.append({"path": os.path.relpath(full, folder).replace(os.sep, "/"),
+                         "sha256": _hashlib.sha256(blob).hexdigest(), "bytes": len(blob)})
+            data.append(_b64.b64encode(blob).decode("ascii"))
+    order = sorted(range(len(docs)), key=lambda i: docs[i]["path"])
+    return {"documents": [docs[i] for i in order], "data": [data[i] for i in order]}
 
 _real_open = builtins.open
 def _open(file, mode="r", *a, **k):
@@ -625,10 +645,17 @@ for line in sys.stdin:
                      "dicts": _dicts()})
         continue
     _EFFECTS.clear()
+    # a fresh folder per call (never cleared in place: rmtree removes by relative name, which reads as an effect)
+    _out_dir = os.path.join(_OUTBASE, "case-%d" % req["case_id"] if isinstance(req.get("case_id"), int) else "case-" + str(len(os.listdir(_OUTBASE))))
+    os.makedirs(_out_dir, exist_ok=True)
+    os.environ["RAPP_OUTPUT_DIR"] = _out_dir
     try:
         out = agent.perform(**req["args"])
-        _proof_send({"case_id": req["case_id"], "ok": True,
-                     "out": out if isinstance(out, str) else json.dumps(out, default=str),
+        out = out if isinstance(out, str) else json.dumps(out, default=str)
+        docs = _collect_documents(_out_dir)
+        if docs["documents"]:
+            out += _DOC_MARK + json.dumps(docs, sort_keys=True, separators=(",", ":"))
+        _proof_send({"case_id": req["case_id"], "ok": True, "out": out,
                      "effects": sorted(_EFFECTS | _AT_IMPORT)})
     except Exception as e:
         _proof_send({"case_id": req["case_id"], "ok": False, "out": f"{type(e).__name__}: {e}",
@@ -654,7 +681,18 @@ def agent_python(version=None):
     return sys.executable
 
 
-EFFECTS = {"files": "reads or writes files (SharePoint plus connector code instead)",
+DOC_MARK = "\n\n\u2063RAPP-DOCUMENTS\u2063"   # separates an output's text from the documents it wrote (runner)
+
+
+def split_documents(out):
+    """(text, {"documents": [...], "data": [...]} or None) from a runner output."""
+    if isinstance(out, str) and DOC_MARK in out:
+        text, docs = out.split(DOC_MARK, 1)
+        return text, json.loads(docs)
+    return out, None
+
+
+EFFECTS = {"files": "reads or writes files outside its RAPP_OUTPUT_DIR (SharePoint plus connector code instead)",
            "network": "calls the network (a custom connector instead)",
            "llm": "calls an LLM (the harness agent reasons instead)",
            "processes": "starts processes (the MCP fallback instead)",
@@ -1324,6 +1362,7 @@ def materialize(agent_file, basic_file, *, class_name="", flow_name=None, compon
         "blocked_operations": blocked_ops,
         "ignored": [n for n, i in disc.inputs.items() if i["rule"] == "ignored"],
         "table_keys": keys, "table_outputs": uniq, "outputs": {"result": "(materialized)"},
+        **({"documents": True} if any(DOC_MARK.encode("utf-8") in base64.b64decode(v) for v in uniq.values()) else {}),
         "vectors": cases_all + _probe_vectors(disc, keyed) + hand_vectors,
         "constants": merged["constants"], "derived": merged["derived"], "fills": merged["fills"],
         "hand_operations": {op: h.get("why", "") for op, h in hand_ops.items() if ops.get(op, {}).get("hand")},

@@ -586,6 +586,12 @@ def build(egg, out_dir, name, publisher_prefix, schema_name=None, sdk_dir=None, 
                 f"name: {name} {spec['flow_name']}\ntype: 1\ndescription: {_yaml_scalar(spec['description'][:200])}\n"
                 "category: 5\nmode: 0\nscope: 4\n")
             (ws / "capabilities" / "tools" / f"{spec['flow_name']}.mcs.yml").write_text(tool_yaml(spec, wf))
+            if materialized and spec.get("documents"):
+                from . import connector_code as _cc
+                for key, v in _cc.files_parameters(schema_name, **(files_home or {})).items():
+                    if not any(e["schemaName"] == v["schemaName"] for e in env_vars):
+                        env_vars.append({"schemaName": v["schemaName"], "displayName": v["displayName"], "type": "String",
+                                         "defaultValue": v["defaultValue"], "files": key})
             for key, meta in spec.get("settings", {}).items():
                 pname, env_schema = _setting_param(schema_name, key, meta)
                 env_vars.append({"schemaName": env_schema, "displayName": meta["display"], "type": "String",
