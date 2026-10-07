@@ -1040,8 +1040,11 @@ class Discovery:
                     or min(vals, key=lambda v: (len(v), v))
                 canon[rep] = rep
             if len(canon) <= 40:
-                info.update(rule="canonical", canon=sorted(canon), canon_map=canon, approximated=True,
-                            why_approx="fuzzy matching is left to the model: the tool lists the known values")
+                # An enum input is only ever called with its listed values, so canonical keying is exact for it.
+                closed = bool(enum) and set(enum) <= set(v for vals in groups.values() for v in vals)
+                info.update(rule="canonical", canon=sorted(canon), canon_map=canon, approximated=not closed,
+                            why_approx=None if closed else
+                            "fuzzy matching is left to the model: the tool lists the known values")
                 return info
         info.update(rule="computational", recognized=recognized[:20],
                     why="this text is searched, classified or transformed; no match rule reproduces it")

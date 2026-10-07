@@ -18,6 +18,23 @@ from pathlib import Path
 from . import StudioBuildError, build
 
 
+
+def _parity_lines(prov, indent):
+    """One line per proven agent, plus what the proof does NOT cover: inputs the flow matches only on the
+    sampled values (other text falls to 'unknown' live) and operations that are blocked in the flow."""
+    mat = {a.get("name"): a.get("materialized") or {} for a in prov.get("agents") or []}
+    lines = []
+    for agent, p in prov.get("parity", {}).items():
+        lines.append(f"parity:{indent}{agent} {p['passed']}/{p['cases']} {'PROVEN' if p['parity'] else 'FAILED'}")
+        m = mat.get(agent) or {}
+        if m.get("approximated_inputs"):
+            lines.append(f"  warning:{indent[:-2]}{agent}: input(s) {', '.join(m['approximated_inputs'])} are matched only on the "
+                         "values the proof sampled; any other text reaches the flow's 'unknown' branch. Prefer an enum "
+                         "or a key-in-text resolver, and check the live replay.")
+        for op, why in (m.get("blocked_operations") or {}).items():
+            lines.append(f"  warning:{indent[:-2]}{agent}.{op} is blocked in the flow ({why if isinstance(why, str) else ', '.join(map(str, why))}).")
+    return lines
+
 def parser():
     p = argparse.ArgumentParser(prog="brainfreeze-studio",
                                 description="Turn a frozen RAPP brainstem (organism egg) into a Copilot Studio agent.")
@@ -197,8 +214,8 @@ def main(argv=None):
     print(f"proof turns: {r['proof_turns']}   memories: {r['memories']}")
     with open(os.path.join(a.out, "provenance.json"), encoding="utf-8") as f:
         prov = json.load(f)
-    for agent, p in prov.get("parity", {}).items():
-        print(f"parity:      {agent} {p['passed']}/{p['cases']} {'PROVEN' if p['parity'] else 'FAILED'}")
+    for line in _parity_lines(prov, "      "):
+        print(line)
     workspace = shlex.quote(str(r["workspace"]))
     environment = shlex.quote(a.environment) if a.environment else "https://<org>.crm.dynamics.com/"
     print(f"next:        python3 -m brainfreeze_studio deploy {workspace} "
@@ -473,8 +490,8 @@ def _rapplication(a):
             prov = json.load(f)
     except (OSError, ValueError):
         prov = {}
-    for agent, p in prov.get("parity", {}).items():
-        print(f"parity:       {agent} {p['passed']}/{p['cases']} {'PROVEN' if p['parity'] else 'FAILED'}")
+    for line in _parity_lines(prov, "       "):
+        print(line)
     app = s.get("codeapp")
     if (s.get("deployed") or {}).get("codeapp_skipped") == "--draft":
         print("code app:     not published (--draft); run again without --draft to publish it")
